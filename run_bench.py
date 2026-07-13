@@ -77,11 +77,18 @@ def build_copilot_cmd(model, tools, prompt):
                  "COPILOT_MODEL": model}
 
 
+def build_codex_cmd(model, tools, prompt):
+    cmd = ["codex", "exec", "--oss", "--local-provider", "ollama",
+           "-m", model, "--dangerously-bypass-approvals-and-sandbox", prompt]
+    return cmd, {}
+
+
 HARNESSES = {
     "pi": dict(build=build_pi_cmd, tools_supported=True, extract=None),
     "opencode": dict(build=build_opencode_cmd, tools_supported=False,
                      extract=extract_opencode_text),
     "copilot": dict(build=build_copilot_cmd, tools_supported=False, extract=None),
+    "codex": dict(build=build_codex_cmd, tools_supported=False, extract=None),
 }
 
 # ---------------------------------------------------------------- smoke 素材

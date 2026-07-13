@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 這是什麼
 
-評測「地端模型(Ollama)× coding agent harness」能力的框架,harness 可選 pi / opencode / GitHub Copilot CLI(三者都接地端模型)。核心原則:不信模型的自我宣稱,每個任務都由程式化 verify 函式實際檢查(跑 pytest、執行產出、比對輸出),且每題跑多輪量化穩定性。
+評測「地端模型(Ollama)× coding agent harness」能力的框架,harness 可選 pi / opencode / copilot / codex(都接地端模型)。核心原則:不信模型的自我宣稱,每個任務都由程式化 verify 函式實際檢查(跑 pytest、執行產出、比對輸出),且每題跑多輪量化穩定性。
 
 ## 常用指令
 
@@ -19,7 +19,7 @@ python3 run_bench.py gemma4:12b
 python3 run_bench.py gemma4:12b qwen3.5:9b --runs 1 --tier complex,cli
 
 # 換 harness(預設 pi)、或跑 harness × model 矩陣
-python3 run_bench.py gemma4:12b --harness pi,opencode,copilot
+python3 run_bench.py gemma4:12b --harness pi,opencode,copilot,codex
 ```
 
 前置需求:`pi` CLI 已安裝且 `~/.pi/agent/models.json` 已註冊 Ollama 模型、`pytest` 可用。X1 素材需先產生一次:`python3 fixtures/X1-officecli/.build.py`(runner 複製 fixture 時排除點開頭檔案,模型看不到產生邏輯)。
