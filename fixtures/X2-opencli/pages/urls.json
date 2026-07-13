@@ -1,0 +1,5 @@
+{
+  "http://shop.local/": "index.html",
+  "http://shop.local/products": "products.html",
+  "http://shop.local/about": "about.html"
+}

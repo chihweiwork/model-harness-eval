@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""OfficeCLI - command-line converter for OFFX office documents."""
+
+import argparse
+import base64
+import sys
+from pathlib import Path
+
+MAGIC = "OFFX1"
+
+
+def read_offx(path):
+    lines = Path(path).read_text().splitlines()
+    if not lines or lines[0] != MAGIC:
+        sys.exit(f"officecli: {path} is not a valid OFFX document (bad magic header)")
+    meta = {}
+    body_start = 1
+    for i, line in enumerate(lines[1:], start=1):
+        if line == "---":
+            body_start = i + 1
+            break
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.strip()
+    payload = "".join(lines[body_start:])
+    try:
+        text = base64.b64decode(payload).decode("utf-8")
+    except Exception:
+        sys.exit(f"officecli: {path} has a corrupt payload")
+    return meta, text
+
+
+def cmd_info(args):
+    meta, text = read_offx(args.file)
+    print(f"File:     {args.file}")
+    print(f"Format:   OFFX v1")
+    for k, v in meta.items():
+        print(f"{k.capitalize() + ':':<10}{v}")
+    print(f"Size:     {len(text)} characters (decoded)")
+
+
+def cmd_convert(args):
+    if args.format != "txt":
+        sys.exit(f"officecli: unsupported output format '{args.format}' (supported: txt)")
+    if not args.output:
+        sys.exit("officecli: --output/-o is required for convert")
+    _meta, text = read_offx(args.file)
+    Path(args.output).write_text(text + "\n")
+    print(f"Converted {args.file} -> {args.output} (txt)")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="officecli",
+        description="Convert and inspect OFFX office documents (.docx in OFFX container format).",
+        epilog="Example: officecli convert report.docx --format txt -o report.txt",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_info = sub.add_parser("info", help="Show document metadata")
+    p_info.add_argument("file", help="Path to the OFFX document")
+    p_info.set_defaults(func=cmd_info)
+
+    p_conv = sub.add_parser("convert", help="Convert a document to another format")
+    p_conv.add_argument("file", help="Path to the OFFX document")
+    p_conv.add_argument("--format", required=True, help="Output format (supported: txt)")
+    p_conv.add_argument("-o", "--output", help="Output file path")
+    p_conv.set_defaults(func=cmd_convert)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

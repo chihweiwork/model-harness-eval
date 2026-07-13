@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""opencli - minimal command-line web browser.
+
+Commands:
+  open <url>        Load a page. Prints the page title.
+  links             List links (href and text) on the current page.
+  text <selector>   Print text of matching elements. Selectors: tag, .class, #id
+  dump              Print the raw HTML of the current page.
+"""
+
+import json
+import re
+import sys
+from pathlib import Path
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "pages"
+SESSION = Path.cwd() / ".opencli_session.json"
+
+
+def load_site():
+    return json.loads((DATA_DIR / "urls.json").read_text())
+
+
+def current_page():
+    if not SESSION.exists():
+        sys.exit("opencli: no page loaded. Use: opencli open <url>")
+    state = json.loads(SESSION.read_text())
+    return state["url"], (DATA_DIR / state["file"]).read_text()
+
+
+def cmd_open(url):
+    site = load_site()
+    if url not in site:
+        known = "\n  ".join(site.keys())
+        sys.exit(f"opencli: cannot resolve {url}\nKnown URLs:\n  {known}")
+    html = (DATA_DIR / site[url]).read_text()
+    SESSION.write_text(json.dumps({"url": url, "file": site[url]}))
+    m = re.search(r"<title>(.*?)</title>", html, re.S)
+    title = m.group(1).strip() if m else "(no title)"
+    print(f"Loaded: {title}")
+    print(f"URL:    {url}")
+
+
+def cmd_links():
+    _url, html = current_page()
+    found = re.findall(r'<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.S)
+    if not found:
+        print("(no links)")
+        return
+    for href, text in found:
+        print(f"{href}\t{re.sub(r'<[^>]+>', '', text).strip()}")
+
+
+def _element_pattern(selector):
+    if selector.startswith("."):
+        cls = re.escape(selector[1:])
+        return rf'<(\w+)[^>]*class="[^"]*\b{cls}\b[^"]*"[^>]*>(.*?)</\1>'
+    if selector.startswith("#"):
+        eid = re.escape(selector[1:])
+        return rf'<(\w+)[^>]*id="{eid}"[^>]*>(.*?)</\1>'
+    tag = re.escape(selector)
+    return rf"<({tag})(?:\s[^>]*)?>(.*?)</\1>"
+
+
+def cmd_text(selector):
+    _url, html = current_page()
+    matches = re.findall(_element_pattern(selector), html, re.S)
+    if not matches:
+        sys.exit(f"opencli: no elements match '{selector}'")
+    for _tag, inner in matches:
+        cleaned = " ".join(re.sub(r"<[^>]+>", " ", inner).split())
+        print(cleaned)
+
+
+def cmd_dump():
+    _url, html = current_page()
+    print(html)
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+    cmd, rest = args[0], args[1:]
+    if cmd == "open" and len(rest) == 1:
+        cmd_open(rest[0])
+    elif cmd == "links" and not rest:
+        cmd_links()
+    elif cmd == "text" and len(rest) == 1:
+        cmd_text(rest[0])
+    elif cmd == "dump" and not rest:
+        cmd_dump()
+    else:
+        sys.exit("opencli: bad usage. Run 'opencli --help'.")
+
+
+if __name__ == "__main__":
+    main()
