@@ -1,0 +1,11 @@
+[project]
+name = "model-harness-eval"
+version = "0.3.0"
+description = "模型 × harness 能力評估框架 — 用程式化驗證量化地端模型在不同 coding agent 下的表現"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+run-bench = "run_bench:main"
