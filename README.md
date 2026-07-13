@@ -10,16 +10,25 @@
 
 ```
 model-harness-eval/
-├── run_bench.py        # 主評測程式
-├── selftest.py         # 評測本身的可信度自測
-├── fixtures/           # 每個複雜任務的起始專案
+├── run_bench.py              # 評測入口（瘦 wrapper）
+├── bench/                    # 源碼 package
+│   ├── __init__.py           # 路徑常數
+│   ├── harnesses.py          # harness registry（build 函式 + HARNESSES dict）
+│   ├── tasks.py              # 11 個任務定義、verify/setup 函式
+│   └── runner.py             # 執行引擎、CLI、報告產生
+├── tests/                    # pytest 測試（驗證 fixtures 與 verify 函式可信）
+│   ├── conftest.py           # copy_fixture helper、fix_* 正解函式
+│   ├── test_verify_complex.py  # C1/C2/C3 雙向檢查
+│   ├── test_verify_long.py     # L1 雙向檢查
+│   └── test_verify_cli.py      # X1/X2 雙向檢查
+├── fixtures/                 # 每個複雜任務的起始專案
 │   ├── C1-crossfile-bug/
 │   ├── C2-refactor-green/
 │   ├── C3-misleading-trace/
 │   ├── L1-todo-spec/
 │   ├── X1-officecli/
 │   └── X2-opencli/
-├── results/            # 每次評測的 Markdown 報告
+├── results/                  # 每次評測的 Markdown 報告
 └── README.md
 ```
 
@@ -152,14 +161,19 @@ a.py 與 b.py 有一段完全相同的名字正規化邏輯（`" ".join(name.str
 
 **多輪的意義**：地端小模型有偶發性失敗（同一任務有時過有時空轉）。單輪只能回答「會不會」，5 輪能回答「多可靠」——`3/5` 和 `0/5` 是完全不同的診斷：前者是不穩，後者是系統性問題。
 
-## selftest.py — 評測自身的可信度
+## tests/ — 評測自身的可信度
 
-評測結果要可信，驗證邏輯本身得先被驗證。selftest 對 6 個複雜任務各做兩個方向的檢查：
+評測結果要可信，驗證邏輯本身得先被驗證。`tests/` 目錄用 pytest 對 6 個 fixture 任務各做兩個方向的檢查（共 12 個 test）：
 
-1. **原始碼直接跑 verify → 必須 FAIL**：確認 bug 真的存在、驗證不會放水（假陰性檢查的反面）。
-2. **套用人工正解再跑 verify → 必須 PASS**：確認驗證不會誤殺正確解法，同時實測 mock CLI 真的能用（X1 正解就是真的去執行 officecli convert）。
+1. **原始碼直接跑 verify → 必須 FAIL**：確認 bug 真的存在、驗證不會放水。
+2. **套用人工正解再跑 verify → 必須 PASS**：確認驗證不會誤殺正確解法，同時實測 mock CLI 真的能用。
 
-任何一項不符 exit 1，擋住後續評測，避免拿壞掉的尺去量模型。
+```bash
+pytest           # 12 個 test 全綠才能拿去評測模型
+pytest -v        # 看每個 test 的名稱與結果
+```
+
+測試按 tier 分檔：`test_verify_complex.py`（C1/C2/C3）、`test_verify_long.py`（L1）、`test_verify_cli.py`（X1/X2）。正解函式（`fix_*`）定義在 `tests/conftest.py`。
 
 ## 已知限制與待辦
 
