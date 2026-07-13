@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""pi + 地端模型評測 v2
+"""harness × 地端模型評測 v3
 
 用法:
-    python3 run_bench.py gemma4:12b                          # 全部 tier, 每題 5 次
+    python3 run_bench.py gemma4:12b                          # 全部 tier, 每題 5 次, harness=pi
     python3 run_bench.py gemma4:12b qwen3.5:9b --runs 3
     python3 run_bench.py gemma4:12b --tier complex,cli --runs 1
+    python3 run_bench.py gemma4:12b --harness opencode
+    python3 run_bench.py gemma4:12b --harness pi,opencode,copilot   # harness × model 矩陣
 
+Harness: pi(預設) / opencode / copilot — 三者都接 Ollama 地端模型。
 Tier: smoke(簡單) / complex(多檔coding) / long(長程) / cli(陌生CLI) / real(真實工具, 需 --tier 指定)
-每個任務在乾淨 tempdir 執行 pi -p, 用程式驗證結果, 統計 pass@1 與空轉(EMPTY)率。
-結果輸出到終端 + results/<model>_<timestamp>.md
+每個任務在乾淨 tempdir 以 harness 非互動模式執行, 用程式驗證結果, 統計 pass@1 與空轉(EMPTY)率。
+結果輸出到終端 + results/<harness>_<model>_<timestamp>.md
 """
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -26,6 +30,59 @@ from pathlib import Path
 BENCH_DIR = Path(__file__).parent
 FIXTURES = BENCH_DIR / "fixtures"
 RESULTS_DIR = BENCH_DIR / "results"
+
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# ---------------------------------------------------------------- harness
+
+
+def build_pi_cmd(model, tools, prompt):
+    cmd = ["pi", "--provider", "ollama", "--model", model, "-p", prompt]
+    if tools:
+        cmd[1:1] = ["--tools", tools]
+    return cmd, {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1"}
+
+
+def build_opencode_cmd(model, tools, prompt):
+    # 無 per-run 工具限制旗標, tools 忽略(報告會註記)
+    # 需要 ~/.config/opencode/opencode.jsonc 註冊 ollama provider(見 README)
+    # 預設格式混雜橫幅/工具日誌/ANSI 色碼, 改用 JSON 事件流再抽 text 事件
+    cmd = ["opencode", "run", "--model", f"ollama/{model}", "--auto",
+           "--format", "json", prompt]
+    return cmd, {}
+
+
+def extract_opencode_text(stdout):
+    """從 opencode 的 JSONL 事件流抽出模型給使用者的文字(type=text)。"""
+    texts = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "text":
+            texts.append(ev.get("part", {}).get("text", ""))
+    return "\n".join(t for t in texts if t)
+
+
+def build_copilot_cmd(model, tools, prompt):
+    # BYOK 模式接本地 Ollama(copilot help providers)
+    # 內建工具名稱未文件化, 無法精確對應 --available-tools, tools 忽略(報告會註記)
+    cmd = ["copilot", "-p", prompt, "--allow-all-tools", "-s", "--no-color",
+           "--no-custom-instructions", "--no-ask-user", "--no-auto-update"]
+    return cmd, {"COPILOT_PROVIDER_BASE_URL": f"{OLLAMA_BASE_URL}/v1",
+                 "COPILOT_MODEL": model}
+
+
+HARNESSES = {
+    "pi": dict(build=build_pi_cmd, tools_supported=True, extract=None),
+    "opencode": dict(build=build_opencode_cmd, tools_supported=False,
+                     extract=extract_opencode_text),
+    "copilot": dict(build=build_copilot_cmd, tools_supported=False, extract=None),
+}
 
 # ---------------------------------------------------------------- smoke 素材
 
@@ -263,16 +320,14 @@ STATUS_MARK = {
 }
 
 
-def run_once(model, task):
+def run_once(harness, model, task):
     d = prepare_dir(task)
     try:
         protected = {name: _sha(d / name) for name in task.get("protected", [])}
         snap = _snapshot(d)
 
-        cmd = ["pi", "--provider", "ollama", "--model", model, "-p", task["prompt"]]
-        if task["tools"]:
-            cmd[1:1] = ["--tools", task["tools"]]
-        env = {**os.environ, "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1"}
+        cmd, extra_env = HARNESSES[harness]["build"](model, task["tools"], task["prompt"])
+        env = {**os.environ, **extra_env}
 
         t0 = time.time()
         try:
@@ -284,6 +339,10 @@ def run_once(model, task):
                 return x.decode() if isinstance(x, bytes) else (x or "")
             stdout, stderr, rc, timed_out = _dec(e.stdout), _dec(e.stderr), None, True
         elapsed = round(time.time() - t0, 1)
+
+        extract = HARNESSES[harness]["extract"]
+        if extract:
+            stdout = extract(stdout)
 
         err_note = f"exit={rc}, stderr尾: {stderr.strip()[-200:] or '無'}"
         tampered = [n for n, h in protected.items()
@@ -328,24 +387,35 @@ def main():
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--tier", default=",".join(DEFAULT_TIERS),
                     help="逗號分隔: smoke,complex,long,cli,real")
+    ap.add_argument("--harness", default="pi",
+                    help="逗號分隔: " + ",".join(HARNESSES))
     args = ap.parse_args()
 
     tiers = [t.strip() for t in args.tier.split(",") if t.strip()]
     tasks = [t for t in TASKS if t["tier"] in tiers]
     if not tasks:
         sys.exit(f"沒有符合 tier {tiers} 的任務")
+    harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
+    unknown = [h for h in harnesses if h not in HARNESSES]
+    if unknown:
+        sys.exit(f"未知 harness: {', '.join(unknown)}(可用: {', '.join(HARNESSES)})")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
 
-    for model in args.models:
-        print(f"\n{'=' * 64}\n模型: {model}   runs={args.runs}   tiers={','.join(tiers)}\n{'=' * 64}")
+    for harness, model in [(h, m) for h in harnesses for m in args.models]:
+        tools_note = (not HARNESSES[harness]["tools_supported"]
+                      and any(t["tools"] for t in tasks))
+        print(f"\n{'=' * 64}\nharness: {harness}   模型: {model}   runs={args.runs}   tiers={','.join(tiers)}")
+        if tools_note:
+            print("⚠ 此 harness 不支援 per-run 工具限制, 各任務的 tools 欄位未生效")
+        print("=" * 64)
         summary, all_runs = [], []
         for task in tasks:
             results = []
             for i in range(args.runs):
                 print(f"  {task['id']} run {i + 1}/{args.runs} ...", end="", flush=True)
-                res = run_once(model, task)
+                res = run_once(harness, model, task)
                 mark = STATUS_MARK[res["status"]]
                 print(f" {mark} ({res['seconds']}s) {res['detail']}")
                 results.append(res)
@@ -365,11 +435,14 @@ def main():
         total_r = sum(s["runs"] for s in summary)
         print(f"\n  總計: {total_p}/{total_r} ({100 * total_p // total_r}%)")
 
-        report = RESULTS_DIR / f"{model.replace(':', '_').replace('/', '_')}_{stamp}.md"
-        lines = [f"# pi-bench v2: {model}",
-                 f"日期: {time.strftime('%Y-%m-%d %H:%M')}  runs={args.runs}  tiers={','.join(tiers)}",
-                 "", "| 任務 | tier | 通過率 | 靜默通過 | EMPTY | 平均秒數 |",
-                 "|---|---|---|---|---|---|"]
+        safe_model = model.replace(":", "_").replace("/", "_")
+        report = RESULTS_DIR / f"{harness}_{safe_model}_{stamp}.md"
+        lines = [f"# model-harness-eval: {model} × {harness}",
+                 f"日期: {time.strftime('%Y-%m-%d %H:%M')}  harness={harness}  runs={args.runs}  tiers={','.join(tiers)}"]
+        if tools_note:
+            lines.append("\n> ⚠ 此 harness 不支援 per-run 工具限制, 各任務的 tools 欄位未生效。")
+        lines += ["", "| 任務 | tier | 通過率 | 靜默通過 | EMPTY | 平均秒數 |",
+                  "|---|---|---|---|---|---|"]
         for s in summary:
             lines.append(f"| {s['task']} | {s['tier']} | {s['passed']}/{s['runs']} "
                          f"| {s['silent']} | {s['empties']} | {s['avg']} |")

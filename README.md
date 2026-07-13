@@ -1,8 +1,8 @@
 # model-harness-eval — 模型 × harness 能力評估框架
 
-（原名 pi-bench；目前的 harness 以 pi coding agent 為主，架構上可換成其他 agent harness）
+（原名 pi-bench；harness 可選 pi / opencode / GitHub Copilot CLI，三者都接 Ollama 地端模型）
 
-用可重複、可驗證的方式回答一個問題：**「某個地端模型（透過 Ollama）配上 pi coding agent，到底能撐到哪一級任務？」**
+用可重複、可驗證的方式回答一個問題：**「某個地端模型（透過 Ollama）配上某個 coding agent harness，到底能撐到哪一級任務？」**
 
 不聽模型自己說做完了——每個任務都由程式實際檢查結果（跑 pytest、執行產出的程式、比對檔案），並且每題跑多輪來量化穩定性。
 
@@ -26,7 +26,7 @@ model-harness-eval/
 ## 執行方式
 
 ```bash
-# 完整評測：11 個任務 × 每題 5 輪
+# 完整評測：11 個任務 × 每題 5 輪（harness 預設 pi）
 python3 run_bench.py gemma4:12b
 
 # 多模型比較
@@ -34,9 +34,42 @@ python3 run_bench.py gemma4:12b qwen3.5:9b
 
 # 只跑特定 tier、控制輪數
 python3 run_bench.py gemma4:12b --runs 1 --tier complex,cli
+
+# 換 harness、或跑 harness × model 矩陣
+python3 run_bench.py gemma4:12b --harness opencode
+python3 run_bench.py gemma4:12b --harness pi,opencode,copilot
 ```
 
-前置需求：`pi` 已安裝且 `~/.pi/agent/models.json` 已註冊 Ollama 模型、`pytest` 可用、（R tier）`agent-browser` 已安裝。首次使用需先產生 X1 素材：`python3 fixtures/X1-officecli/.build.py`。
+通用前置需求：`pytest` 可用、（R tier）`agent-browser` 已安裝。首次使用需先產生 X1 素材：`python3 fixtures/X1-officecli/.build.py`。
+
+### Harness 前置設定
+
+| harness | 需求 |
+|---|---|
+| `pi` | `pi` 已安裝且 `~/.pi/agent/models.json` 已註冊 Ollama 模型 |
+| `opencode` | `opencode` 已安裝，且 `~/.config/opencode/opencode.jsonc` 註冊 ollama provider（見下方範例） |
+| `copilot` | `copilot` CLI 已安裝；透過官方 BYOK 環境變數接本地 Ollama（runner 自動設定，無需登入 GitHub） |
+
+opencode 的 ollama provider 設定範例（模型要逐一列在 `models` 裡）：
+
+```jsonc
+// ~/.config/opencode/opencode.jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": { "gemma4:12b": { "name": "gemma4:12b" } }
+    }
+  }
+}
+```
+
+Ollama 端點非預設位置時,以 `OLLAMA_BASE_URL` 環境變數告知 runner(影響 copilot 的 BYOK 設定;opencode 要同步改 config)。
+
+**harness 差異注意**：pi 支援 per-run 工具限制（`--tools`），opencode 與 copilot 沒有對等機制——這兩個 harness 跑「工具受限任務」（T1/T4/X1/X2）時全工具開放，報告會自動註記「tools 欄位未生效」，跨 harness 比較時要記得這點。opencode 的模型輸出從 `--format json` 事件流抽取（type=text），copilot 用 `-s` 只印回答，兩者的 EMPTY 判定因此與 pi 對齊。
 
 ## 任務清單（5 個 tier、11 題）
 
@@ -99,7 +132,10 @@ a.py 與 b.py 有一段完全相同的名字正規化邏輯（`" ".join(name.str
 **每輪的執行流程**：
 1. `prepare_dir()` 建全新 tempdir：fixture 整包複製（排除 `.` 開頭檔案與 `__pycache__`），`bin/` 下的檔案自動 chmod +x；無 fixture 的任務跑 inline setup 函式。
 2. 記下所有「保護檔案」的 SHA-256。
-3. 以 tempdir 為 cwd 執行 `pi --provider ollama --model <M> [--tools ...] -p "<prompt>"`，環境帶 `PI_OFFLINE=1` 與 `PI_SKIP_VERSION_CHECK=1`（避免啟動時的網路請求干擾計時）。
+3. 以 tempdir 為 cwd，用選定 harness 的非互動模式執行（cmd/env 由 `HARNESSES` registry 的 build 函式組出）：
+   - `pi`：`pi --provider ollama --model <M> [--tools ...] -p "<prompt>"`，環境帶 `PI_OFFLINE=1` 與 `PI_SKIP_VERSION_CHECK=1`（避免啟動時的網路請求干擾計時）。
+   - `opencode`：`opencode run --model ollama/<M> --auto --format json "<prompt>"`，stdout 為 JSONL 事件流，runner 抽取 type=text 事件作為模型輸出。
+   - `copilot`：`copilot -p "<prompt>" --allow-all-tools -s --no-color --no-custom-instructions --no-ask-user --no-auto-update`，環境帶 `COPILOT_PROVIDER_BASE_URL=<ollama>/v1` 與 `COPILOT_MODEL=<M>`（BYOK 接地端）。
 4. 依序判定，取第一個命中的結果：
    - **逾時**：超過任務 timeout，pi 被強制終止。
    - **EMPTY**：pi 正常退出但 stdout 為空——模型從頭到尾沒產出給使用者的文字。注意：目前只讀 stdout，模型中間做了什麼、pi 有沒有在 stderr 報錯都看不到（已知盲點，見下）。
