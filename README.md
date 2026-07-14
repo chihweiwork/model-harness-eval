@@ -96,7 +96,41 @@ uv run python run_bench.py gemma4:12b --runs 5 --task C2,C3,L1,X1
 uv run python -m bench.report --results results
 ```
 
-runner 會先用 Git 歷史固定的 fixture blob fingerprint 驗證題目基線，並在每輪後確認 agent 沒有改到來源 `fixtures/`。基線不符或來源遭修改時會立即中止，不會繼續產生可計分結果。
+## 隔離與恢復
+
+正式 benchmark 預設使用 Git disposable worktree，不使用 container。runner 會先從 Git tree 建立 `/tmp/model-harness-worktree-*`，子程序在該 worktree 裡執行，結果寫回主 checkout 的 `results/`，結束後移除 worktree。
+
+這個設計的重點：
+
+- 主 checkout 的 `fixtures/` 不會被 agent 直接改到。
+- benchmark 跑的是已提交版本，預設來源是 `HEAD`。
+- 如果 benchmark 中斷，最多留下 `/tmp/model-harness-worktree-*`；主 checkout 不需要手動回復。
+- 沒有 Docker/container 流程；LiteLLM/Ollama 仍使用目前文件描述的本機服務。
+
+子程序開始 benchmark 前，仍會用 Git tree 初始化該 worktree 內的 `fixtures/`（預設 `--fixture-source HEAD`），再用 Git 歷史固定的 fixture blob fingerprint 驗證題目基線，並在每輪後確認 agent 沒有改到該 worktree 的來源 `fixtures/`。基線不符或來源遭修改時會立即中止，不會繼續產生可計分結果。
+
+常用恢復與隔離命令：
+
+```bash
+# 只恢復/驗證主 checkout 的 fixtures，不跑模型
+uv run python run_bench.py --doctor-fixtures
+
+# 從指定 known-good commit 建 worktree 並初始化 fixtures
+uv run python run_bench.py <model> \
+  --worktree-source <commit> \
+  --fixture-source <commit>
+
+# 開發 runner 時才直接使用目前 checkout；正式 benchmark 不要加
+uv run python run_bench.py <model> --no-worktree-isolation
+```
+
+正式 benchmark 前要先 commit runner 變更；因為預設 worktree 來源是 `HEAD`，未提交的 runner 修改不會進入 disposable worktree。
+
+如果有中斷後殘留的 disposable worktree，可先查看：
+
+```bash
+git worktree list
+```
 
 `pyproject.toml` 也定義了 `run-bench` entry point；等價用法：
 

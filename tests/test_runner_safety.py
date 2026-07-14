@@ -1,4 +1,6 @@
 import shutil
+import stat
+import subprocess
 
 import pytest
 
@@ -7,6 +9,7 @@ from bench.fixture_baseline import (
     FixtureBaselineError,
     SourceFixtureTampered,
     assert_fixture_tree_unchanged,
+    reset_fixture_tree,
     snapshot_fixture_tree,
     validate_fixture_baseline,
 )
@@ -37,6 +40,43 @@ def test_source_fixture_snapshot_detects_mutation(tmp_path):
     source.write_text("after")
     with pytest.raises(SourceFixtureTampered, match="sample.txt"):
         assert_fixture_tree_unchanged(fixtures, before)
+
+
+def test_reset_fixture_tree_restores_committed_tree(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "bench@example.test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Bench Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    tracked = fixtures / "task.py"
+    tracked.write_text("original\n")
+    tracked.chmod(0o755)
+    subprocess.run(["git", "add", "fixtures/task.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    tracked.write_text("polluted\n")
+    tracked.chmod(0o644)
+    (fixtures / "generated.txt").write_text("pollution\n")
+
+    changed = reset_fixture_tree(fixtures)
+
+    assert changed == ["generated.txt", "task.py"]
+    assert tracked.read_text() == "original\n"
+    assert tracked.stat().st_mode & stat.S_IXUSR
+    assert not (fixtures / "generated.txt").exists()
 
 
 def test_task_filter_uses_stable_prefixes():

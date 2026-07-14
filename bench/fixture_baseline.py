@@ -8,6 +8,7 @@ added.  Keeping the blob ids here makes fixture contamination fail closed.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from pathlib import Path
 
 
@@ -48,6 +49,93 @@ class SourceFixtureTampered(RuntimeError):
 def git_blob_id(data: bytes) -> str:
     header = f"blob {len(data)}\0".encode()
     return hashlib.sha1(header + data).hexdigest()
+
+
+def _repo_root(fixtures: Path) -> Path:
+    return fixtures.resolve().parent
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise FixtureBaselineError(result.stderr.strip() or result.stdout.strip())
+    return result.stdout
+
+
+def tracked_fixture_entries(fixtures: Path, source: str = "HEAD") -> dict[str, str]:
+    repo = _repo_root(fixtures)
+    output = _git(repo, "ls-tree", "-rz", source, "--", fixtures.name)
+    prefix = f"{fixtures.name}/"
+    entries = {}
+    for record in output.split("\0"):
+        if not record or "\t" not in record:
+            continue
+        meta, name = record.split("\t", 1)
+        if not name.startswith(prefix):
+            continue
+        mode = meta.split(" ", 1)[0]
+        entries[name[len(prefix):]] = mode
+    return entries
+
+
+def tracked_fixture_files(fixtures: Path, source: str = "HEAD") -> set[str]:
+    return set(tracked_fixture_entries(fixtures, source))
+
+
+def reset_fixture_tree(fixtures: Path, source: str = "HEAD") -> list[str]:
+    """Restore tracked fixtures from Git and remove untracked generated files."""
+    repo = _repo_root(fixtures)
+    fixtures.mkdir(parents=True, exist_ok=True)
+    tracked = tracked_fixture_entries(fixtures, source)
+    changed: list[str] = []
+
+    for relative, mode in sorted(tracked.items()):
+        path = fixtures / relative
+        data = subprocess.run(
+            ["git", "show", f"{source}:{fixtures.name}/{relative}"],
+            cwd=repo,
+            capture_output=True,
+            check=False,
+        )
+        if data.returncode:
+            raise FixtureBaselineError(
+                data.stderr.decode(errors="replace").strip()
+                or f"cannot read {source}:{fixtures.name}/{relative}"
+            )
+        before = path.read_bytes() if path.exists() and path.is_file() else None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if before != data.stdout:
+            path.write_bytes(data.stdout)
+            changed.append(relative)
+        current_mode = path.stat().st_mode
+        current_exec = current_mode & 0o111
+        desired_exec = 0o111 if mode == "100755" else 0
+        if current_exec != desired_exec:
+            desired_mode = ((current_mode & 0o777) ^ current_exec) | desired_exec
+            path.chmod(desired_mode)
+            if relative not in changed:
+                changed.append(relative)
+
+    for path in sorted(fixtures.rglob("*"), reverse=True):
+        if path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+            continue
+        relative = str(path.relative_to(fixtures))
+        if relative in tracked:
+            continue
+        path.unlink()
+        changed.append(relative)
+
+    return sorted(changed)
 
 
 def validate_fixture_baseline(fixtures: Path) -> str:

@@ -22,10 +22,12 @@ from pathlib import Path
 from urllib.request import urlopen
 from urllib.error import URLError
 
-from bench import FIXTURES, RESULTS_DIR
+from bench import FIXTURES, RESULTS_DIR, ROOT
 from bench.fixture_baseline import (
     BASELINE_COMMIT,
+    FixtureBaselineError,
     assert_fixture_tree_unchanged,
+    reset_fixture_tree,
     snapshot_fixture_tree,
     validate_fixture_baseline,
 )
@@ -33,8 +35,52 @@ from bench.harnesses import HARNESSES, PROVIDERS, LITELLM_BASE_URL
 from bench.tasks import TASKS, DEFAULT_TIERS
 
 
+WORKTREE_CHILD_ENV = "BENCH_WORKTREE_CHILD"
+
+
 def _sha(p: Path):
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _run_git(args, cwd=ROOT):
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    return result.stdout
+
+
+def run_in_disposable_worktree(args):
+    worktree = Path(tempfile.mkdtemp(prefix="model-harness-worktree-"))
+    shutil.rmtree(worktree)
+    _run_git(["worktree", "add", "--detach", str(worktree), args.worktree_source])
+    env = {
+        **os.environ,
+        WORKTREE_CHILD_ENV: "1",
+        "BENCH_RESULTS_DIR": str(RESULTS_DIR),
+    }
+    cmd = [sys.executable, "run_bench.py", *sys.argv[1:], "--no-worktree-isolation"]
+    try:
+        return subprocess.run(cmd, cwd=worktree, env=env).returncode
+    finally:
+        removed = subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if removed.returncode:
+            print(
+                f"warning: failed to remove worktree {worktree}: "
+                f"{removed.stderr.strip() or removed.stdout.strip()}",
+                file=sys.stderr,
+            )
 
 
 def prepare_dir(task) -> Path:
@@ -191,7 +237,7 @@ def ensure_litellm(auto_start=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("models", nargs="+")
+    ap.add_argument("models", nargs="*")
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--tier", default=",".join(DEFAULT_TIERS),
                     help="逗號分隔: smoke,complex,long,cli,real")
@@ -203,7 +249,37 @@ def main():
                     help="逗號分隔: " + ",".join(PROVIDERS))
     ap.add_argument("--auto-start-litellm", action="store_true",
                     help="自動啟動 LiteLLM proxy（如果未運行）")
+    ap.add_argument("--fixture-source", default="HEAD",
+                    help="每次跑前用這個 Git commit/tree 初始化 fixtures")
+    ap.add_argument("--no-reset-fixtures", action="store_true",
+                    help="不要在 benchmark 前自動從 Git tree 還原 fixtures")
+    ap.add_argument("--doctor-fixtures", action="store_true",
+                    help="只從 Git tree 還原 fixtures 並驗證，不執行 benchmark")
+    ap.add_argument("--worktree-source", default="HEAD",
+                    help="每次 benchmark 用這個 Git commit/tree 建立 disposable worktree")
+    ap.add_argument("--no-worktree-isolation", action="store_true",
+                    help="不要建立 disposable worktree；直接在目前 checkout 執行")
     args = ap.parse_args()
+
+    if args.doctor_fixtures:
+        try:
+            changed = reset_fixture_tree(FIXTURES, args.fixture_source)
+            fingerprint = validate_fixture_baseline(FIXTURES)
+        except FixtureBaselineError as exc:
+            sys.exit(str(exc))
+        if changed:
+            print("restored fixtures:")
+            for relative in changed:
+                print(f"  {relative}")
+        else:
+            print("fixtures already clean")
+        print(f"baseline_commit={BASELINE_COMMIT}")
+        print(f"baseline_fingerprint={fingerprint}")
+        return
+    if not args.models:
+        ap.error("需要至少一個 model，或使用 --doctor-fixtures")
+    if not args.no_worktree_isolation and not os.environ.get(WORKTREE_CHILD_ENV):
+        sys.exit(run_in_disposable_worktree(args))
 
     tiers = [t.strip() for t in args.tier.split(",") if t.strip()]
     try:
@@ -221,6 +297,8 @@ def main():
     if unknown_p:
         sys.exit(f"未知 provider: {', '.join(unknown_p)}（可用: {', '.join(PROVIDERS)}）")
 
+    if not args.no_reset_fixtures:
+        reset_fixture_tree(FIXTURES, args.fixture_source)
     baseline_fingerprint = validate_fixture_baseline(FIXTURES)
 
     # 檢查 LiteLLM 是否需要運行
