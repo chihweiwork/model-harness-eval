@@ -29,7 +29,7 @@ model-harness-eval/
 │   ├── X1-officecli/
 │   └── X2-opencli/
 ├── results/                  # 每次評測的 Markdown 報告
-├── litellm_config.yaml       # litellm proxy 模型路由設定範本
+├── litellm_config.yaml.example       # litellm proxy 模型路由設定範本
 └── README.md
 ```
 
@@ -102,13 +102,13 @@ opencode 的 provider 設定範例（模型要逐一列在 `models` 裡）：
 
 ```bash
 docker run -d -p 4000:4000 \
-  -v $(pwd)/litellm_config.yaml:/app/config.yaml \
+  -v $(pwd)/litellm_config.yaml.example:/app/config.yaml \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION_NAME \
   ghcr.io/berriai/litellm:main-latest \
   --config /app/config.yaml
 ```
 
-在 `litellm_config.yaml` 中設定要路由的模型（專案根目錄已有範本）。各 harness 透過 litellm 的 OpenAI-compatible API 連接：
+在 `litellm_config.yaml.example` 中設定要路由的模型（專案根目錄已有範本）。各 harness 透過 litellm 的 OpenAI-compatible API 連接：
 
 | harness | litellm 接法 |
 |---|---|

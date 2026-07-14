@@ -30,7 +30,7 @@ python3 run_bench.py gemma4:12b --provider ollama,litellm --harness pi,copilot
 
 前置需求:`pi` CLI 已安裝且 `~/.pi/agent/models.json` 已註冊 Ollama 模型、`pytest` 可用。X1 素材需先產生一次:`python3 fixtures/X1-officecli/.build.py`(runner 複製 fixture 時排除點開頭檔案,模型看不到產生邏輯)。
 
-litellm 前置需求:啟動 litellm proxy Docker（`docker run -d -p 4000:4000 -v $(pwd)/litellm_config.yaml:/app/config.yaml -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION_NAME ghcr.io/berriai/litellm:main-latest --config /app/config.yaml`），並在 `~/.config/opencode/opencode.jsonc` 設定 litellm provider。
+litellm 前置需求:複製 `litellm_config.yaml.example` 為 `litellm_config.yaml` 並填入模型設定，啟動 litellm proxy Docker（`docker run -d -p 4000:4000 -v $(pwd)/litellm_config.yaml:/app/config.yaml -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION_NAME ghcr.io/berriai/litellm:main-latest --config /app/config.yaml`），並在 `~/.config/opencode/opencode.jsonc` 設定 litellm provider。
 
 ## 架構
 
