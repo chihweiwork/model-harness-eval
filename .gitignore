@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .omc/
 litellm_config.yaml
+.litellm.pid
+.litellm.log
+.env

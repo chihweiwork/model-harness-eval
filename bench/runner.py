@@ -19,9 +19,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.request import urlopen
+from urllib.error import URLError
 
 from bench import FIXTURES, RESULTS_DIR
-from bench.harnesses import HARNESSES, PROVIDERS
+from bench.harnesses import HARNESSES, PROVIDERS, LITELLM_BASE_URL
 from bench.tasks import TASKS, DEFAULT_TIERS
 
 
@@ -118,6 +120,47 @@ def run_once(harness, provider, model, task):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def check_litellm_running():
+    """檢查 LiteLLM proxy 是否運行"""
+    try:
+        from urllib.request import Request
+        # 使用 /v1/models 更快，不會測試所有模型
+        req = Request(f"{LITELLM_BASE_URL}/v1/models")
+        req.add_header("Authorization", "Bearer sk-1234")
+        with urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (URLError, Exception):
+        return False
+
+
+def ensure_litellm(auto_start=False):
+    """確保 LiteLLM proxy 運行（如果需要）"""
+    if check_litellm_running():
+        return True
+
+    if not auto_start:
+        print(f"\n❌ Error: LiteLLM proxy not running at {LITELLM_BASE_URL}", file=sys.stderr)
+        print(f"→ Start with: ./litellm.sh start", file=sys.stderr)
+        print(f"→ Or use --auto-start-litellm flag", file=sys.stderr)
+        sys.exit(1)
+
+    # 自動啟動
+    print(f"→ Starting LiteLLM proxy...")
+    script = Path(__file__).parent.parent / "litellm.sh"
+    if not script.exists():
+        print(f"❌ Error: {script} not found", file=sys.stderr)
+        sys.exit(1)
+
+    result = subprocess.run([str(script), "start"], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"❌ Failed to start LiteLLM:", file=sys.stderr)
+        print(result.stderr, file=sys.stderr)
+        sys.exit(1)
+
+    print("✓ LiteLLM started")
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("models", nargs="+")
@@ -128,6 +171,8 @@ def main():
                     help="逗號分隔: " + ",".join(HARNESSES))
     ap.add_argument("--provider", default="ollama",
                     help="逗號分隔: " + ",".join(PROVIDERS))
+    ap.add_argument("--auto-start-litellm", action="store_true",
+                    help="自動啟動 LiteLLM proxy（如果未運行）")
     args = ap.parse_args()
 
     tiers = [t.strip() for t in args.tier.split(",") if t.strip()]
@@ -142,6 +187,10 @@ def main():
     unknown_p = [p for p in providers if p not in PROVIDERS]
     if unknown_p:
         sys.exit(f"未知 provider: {', '.join(unknown_p)}（可用: {', '.join(PROVIDERS)}）")
+
+    # 檢查 LiteLLM 是否需要運行
+    if "litellm" in providers:
+        ensure_litellm(auto_start=args.auto_start_litellm)
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
