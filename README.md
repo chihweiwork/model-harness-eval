@@ -56,7 +56,13 @@ python3 run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 --provid
 python3 run_bench.py gemma4:12b --provider ollama,litellm --harness pi,copilot
 ```
 
-通用前置需求：`pytest` 可用、（R tier）`agent-browser` 已安裝。首次使用需先產生 X1 素材：`python3 fixtures/X1-officecli/.build.py`。
+通用前置需求：Python 3.10+、`pytest` 可用、（R tier）`agent-browser` 已安裝。首次使用需先產生 X1 素材：`python3 fixtures/X1-officecli/.build.py`。
+
+```bash
+# 建議先安裝目前 package 與測試依賴
+python3 -m pip install -e .
+pytest
+```
 
 ### Harness 前置設定
 
@@ -98,7 +104,60 @@ opencode 的 provider 設定範例（模型要逐一列在 `models` 裡）：
 
 ### litellm Provider 設定
 
-使用 `--provider litellm` 時，需先啟動 litellm proxy Docker：
+使用 `--provider litellm` 時，需先啟動 LiteLLM proxy，預設位址是 `http://localhost:4000`。本 repo 支援兩種啟動方式：
+
+#### 方式 A：本機 LiteLLM + PostgreSQL（建議）
+
+`litellm.sh` 是專案內維護的啟停腳本，適合長時間跑 benchmark、保留 LiteLLM 狀態與日誌。它會讀取 `litellm_config.yaml`，使用 PostgreSQL 作為 LiteLLM database，並把 pid/log 寫到 `.litellm.pid`、`.litellm.log`（這些檔案已被 gitignore）。
+
+一次性準備：
+
+```bash
+# 1. 安裝 PostgreSQL 與 LiteLLM proxy 依賴（依環境調整）
+sudo apt install postgresql
+python3 -m pip install 'litellm[proxy]' prisma
+
+# 2. 建立 litellm 資料庫與使用者
+sudo bash setup_litellm_db.sh
+
+# 3. 建立實際設定檔，填入要路由的 Bedrock/雲端模型
+cp litellm_config.yaml.example litellm_config.yaml
+```
+
+`setup_litellm_db.sh` 會建立 `litellm` database、`litellm` user，預設密碼是 `litellm_password`，連線字串為 `postgresql://litellm:litellm_password@localhost:5432/litellm`。若要改 DB host/user/password，可用 `litellm.sh` 支援的 `LITELLM_DB_*` 環境變數。
+
+啟動與檢查：
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=us-west-2
+
+./litellm.sh start
+./litellm.sh status
+./litellm.sh test
+./litellm.sh logs --tail 100
+```
+
+常用管理指令：
+
+```bash
+./litellm.sh stop
+./litellm.sh restart
+./litellm.sh db
+./litellm.sh clean
+```
+
+runner 也可以在需要 `litellm` provider 時嘗試自動啟動：
+
+```bash
+python3 run_bench.py bedrock/nvidia.nemotron-super-3-120b \
+  --provider litellm --harness copilot --auto-start-litellm
+```
+
+#### 方式 B：Docker LiteLLM proxy（快速替代）
+
+如果只想快速啟動 proxy，也可以用 Docker。這條路徑不使用 `litellm.sh` 的 PostgreSQL 管理流程：
 
 ```bash
 docker run -d -p 4000:4000 \
@@ -108,7 +167,9 @@ docker run -d -p 4000:4000 \
   --config /app/config.yaml
 ```
 
-在 `litellm_config.yaml.example` 中設定要路由的模型（專案根目錄已有範本）。各 harness 透過 litellm 的 OpenAI-compatible API 連接：
+若要保存本機實際設定，請複製 `litellm_config.yaml.example` 為 `litellm_config.yaml` 後再掛載該檔，避免把私有模型/金鑰設定寫回範本。
+
+各 harness 透過 litellm 的 OpenAI-compatible API 連接：
 
 | harness | litellm 接法 |
 |---|---|
