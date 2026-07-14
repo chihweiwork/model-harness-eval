@@ -1,132 +1,137 @@
-# model-harness-eval — 模型 × harness × provider 能力評估框架
+# model-harness-eval
 
-（原名 pi-bench；harness 可選 pi / opencode / copilot / codex；provider 可選 ollama 地端模型或 litellm 接 AWS Bedrock 等雲端模型）
+模型 × coding agent harness × provider 的能力評估框架。這個 repo 用可重複、可驗證的任務回答一個問題：同一個模型搭配不同 harness 時，實際能完成到哪一級 coding agent 任務。
 
-用可重複、可驗證的方式回答一個問題：**「某個模型配上某個 coding agent harness，到底能撐到哪一級任務？」** 模型太大跑不動本地時，透過 litellm proxy 接 Bedrock。
+核心原則是不信模型自述完成；每個 task 都用程式化 verifier 檢查結果，例如跑 pytest、執行產出的程式、比對檔案與 stdout。每題可跑多輪，用通過率與 EMPTY 次數觀察穩定性。
 
-不聽模型自己說做完了——每個任務都由程式實際檢查結果（跑 pytest、執行產出的程式、比對檔案），並且每題跑多輪來量化穩定性。
+## 支援矩陣
 
-## 檔案結構
-
-```
-model-harness-eval/
-├── run_bench.py              # 評測入口（瘦 wrapper）
-├── bench/                    # 源碼 package
-│   ├── __init__.py           # 路徑常數
-│   ├── harnesses.py          # harness registry（build 函式 + HARNESSES dict）
-│   ├── tasks.py              # 11 個任務定義、verify/setup 函式
-│   └── runner.py             # 執行引擎、CLI、報告產生
-├── tests/                    # pytest 測試（驗證 fixtures 與 verify 函式可信）
-│   ├── conftest.py           # copy_fixture helper、fix_* 正解函式
-│   ├── test_verify_complex.py  # C1/C2/C3 雙向檢查
-│   ├── test_verify_long.py     # L1 雙向檢查
-│   └── test_verify_cli.py      # X1/X2 雙向檢查
-├── fixtures/                 # 每個複雜任務的起始專案
-│   ├── C1-crossfile-bug/
-│   ├── C2-refactor-green/
-│   ├── C3-misleading-trace/
-│   ├── L1-todo-spec/
-│   ├── X1-officecli/
-│   └── X2-opencli/
-├── results/                  # 每次評測的 Markdown 報告
-├── litellm_config.yaml.example       # litellm proxy 模型路由設定範本
-└── README.md
-```
-
-## 執行方式
-
-```bash
-# 完整評測：11 個任務 × 每題 5 輪（harness 預設 pi）
-python3 run_bench.py gemma4:12b
-
-# 多模型比較
-python3 run_bench.py gemma4:12b qwen3.5:9b
-
-# 只跑特定 tier、控制輪數
-python3 run_bench.py gemma4:12b --runs 1 --tier complex,cli
-
-# 換 harness、或跑 harness × model 矩陣
-python3 run_bench.py gemma4:12b --harness opencode
-python3 run_bench.py gemma4:12b --harness pi,opencode,copilot,codex
-
-# 用 litellm provider 測 Bedrock 模型（需先啟動 litellm proxy）
-python3 run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 --provider litellm --harness copilot
-
-# harness × provider × model 完整矩陣
-python3 run_bench.py gemma4:12b --provider ollama,litellm --harness pi,copilot
-```
-
-通用前置需求：Python 3.10+、`pytest` 可用、（R tier）`agent-browser` 已安裝。首次使用需先產生 X1 素材：`python3 fixtures/X1-officecli/.build.py`。
-
-```bash
-# 建議先安裝目前 package 與測試依賴
-python3 -m pip install -e .
-pytest
-```
-
-### Harness 前置設定
-
-| harness | 需求 |
+| 類別 | 選項 |
 |---|---|
-| `pi` | `pi` 已安裝且 `~/.pi/agent/models.json` 已註冊 Ollama 模型 |
-| `opencode` | `opencode` 已安裝，且 `~/.config/opencode/opencode.jsonc` 註冊 ollama provider（見下方範例） |
-| `copilot` | `copilot` CLI 已安裝；透過官方 BYOK 環境變數接本地 Ollama（runner 自動設定，無需登入 GitHub） |
-| `codex` | `codex` CLI 已安裝；透過 `--oss --local-provider ollama` 接地端，無需額外設定 |
+| Harness | `pi`, `opencode`, `copilot`, `codex` |
+| Provider | `ollama`, `litellm` |
+| Task tier | `smoke`, `complex`, `long`, `cli`, `real` |
+| 報告輸出 | `results/<harness>_<provider>_<model>_<timestamp>.md` |
 
-opencode 的 provider 設定範例（模型要逐一列在 `models` 裡）：
+## Provider 用法
 
-```jsonc
-// ~/.config/opencode/opencode.jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "ollama": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Ollama (local)",
-      "options": { "baseURL": "http://localhost:11434/v1" },
-      "models": { "gemma4:12b": { "name": "gemma4:12b" } }
-    },
-    "litellm": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "LiteLLM Proxy",
-      "options": { "baseURL": "http://localhost:4000/v1" },
-      "models": {
-        "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0": {
-          "name": "Claude Sonnet (Bedrock)"
-        }
-      }
-    }
-  }
-}
-```
+`--provider` 決定 runner 怎麼把同一個 model name 接到不同後端。支援值定義在 `bench/harnesses.py`：
 
-端點非預設位置時，以環境變數告知 runner：`OLLAMA_BASE_URL`（預設 `http://localhost:11434`）、`LITELLM_BASE_URL`（預設 `http://localhost:4000`）。
+| Provider | 用途 | 預設 endpoint | 需求 |
+|---|---|---|---|
+| `ollama` | 本機模型 | `http://localhost:11434` | Ollama 正在跑，模型已 pull/註冊到對應 harness |
+| `litellm` | LiteLLM proxy，例如 AWS Bedrock | `http://localhost:4000` | `./litellm.sh start` 已啟動，API key 預設 `sk-1234` |
 
-### litellm Provider 設定
-
-使用 `--provider litellm` 時，需先啟動 LiteLLM proxy，預設位址是 `http://localhost:4000`。本 repo 支援兩種啟動方式：
-
-#### 方式 A：本機 LiteLLM + PostgreSQL（建議）
-
-`litellm.sh` 是專案內維護的啟停腳本，適合長時間跑 benchmark、保留 LiteLLM 狀態與日誌。它會讀取 `litellm_config.yaml`，使用 PostgreSQL 作為 LiteLLM database，並把 pid/log 寫到 `.litellm.pid`、`.litellm.log`（這些檔案已被 gitignore）。
-
-一次性準備：
+`--provider` 可接受逗號分隔清單；runner 會產生 `harness × provider × model` 矩陣：
 
 ```bash
-# 1. 安裝 PostgreSQL 與 LiteLLM proxy 依賴（依環境調整）
-sudo apt install postgresql
-python3 -m pip install 'litellm[proxy]' prisma
-
-# 2. 建立 litellm 資料庫與使用者
-sudo bash setup_litellm_db.sh
-
-# 3. 建立實際設定檔，填入要路由的 Bedrock/雲端模型
-cp litellm_config.yaml.example litellm_config.yaml
+uv run python run_bench.py gemma4:12b \
+  --provider ollama,litellm \
+  --harness pi,copilot \
+  --tier smoke --runs 1
 ```
 
-`setup_litellm_db.sh` 會建立 `litellm` database、`litellm` user，預設密碼是 `litellm_password`，連線字串為 `postgresql://litellm:litellm_password@localhost:5432/litellm`。若要改 DB host/user/password，可用 `litellm.sh` 支援的 `LITELLM_DB_*` 環境變數。
+非預設 endpoint 用環境變數覆蓋：
 
-啟動與檢查：
+```bash
+export OLLAMA_BASE_URL=http://localhost:11434
+export LITELLM_BASE_URL=http://localhost:4000
+```
+
+runner 對 provider 的實際映射：
+
+| Harness | `--provider ollama` | `--provider litellm` |
+|---|---|---|
+| `pi` | `pi --provider ollama --model <model>` | `pi --provider openai --model <model>`，並注入 `OPENAI_BASE_URL=<LITELLM_BASE_URL>/v1`, `OPENAI_API_KEY=sk-1234` |
+| `opencode` | `opencode run --model ollama/<model>` | `opencode run --model litellm/<model>`；需在 `opencode.jsonc` 有同名 provider |
+| `copilot` | 注入 `COPILOT_PROVIDER_BASE_URL=<OLLAMA_BASE_URL>/v1`, `COPILOT_MODEL=<model>` | 注入 `COPILOT_PROVIDER_BASE_URL=<LITELLM_BASE_URL>/v1`, `COPILOT_MODEL=<model>` |
+| `codex` | `codex exec --oss --local-provider ollama -m <model>` | 注入 `OPENAI_BASE_URL=<LITELLM_BASE_URL>`, `OPENAI_API_KEY=sk-1234`，再跑 `codex exec -m <model>` |
+
+當 provider 清單包含 `litellm` 時，runner 會先打 `LITELLM_BASE_URL/v1/models` 檢查 proxy；未啟動時可加 `--auto-start-litellm` 讓 runner 呼叫 `./litellm.sh start`。
+
+## 專案結構
+
+```text
+model-harness-eval/
+├── run_bench.py                 # 評測 CLI wrapper
+├── bench/
+│   ├── __init__.py              # 路徑常數
+│   ├── harnesses.py             # harness/provider command builder
+│   ├── runner.py                # 執行引擎、CLI、report 產生
+│   └── tasks.py                 # task 定義、setup、verify 函式
+├── tests/                       # verifier 自身的 pytest 測試
+├── fixtures/                    # 複雜/CLI task 的起始專案
+├── results/                     # benchmark Markdown 報告
+├── litellm.sh                   # 本機 LiteLLM + PostgreSQL 管理腳本
+├── setup_litellm_db.sh          # 建立 LiteLLM PostgreSQL database/user
+├── litellm_config.yaml.example  # LiteLLM model routing 範本
+└── README_LITELLM.md            # LiteLLM/harness 詳細設定筆記
+```
+
+## 快速開始
+
+本 repo 的測試與 benchmark 指令以 `uv run` 為準。
+
+```bash
+# 安裝/同步 Python 依賴
+uv sync
+
+# 驗證 verifier 與 fixture 正解
+uv run pytest
+uv run pytest -v
+
+# 完整評測：預設 provider=ollama, harness=pi, runs=5, tiers=all
+uv run python run_bench.py gemma4:12b
+
+# 短測：只跑 complex 和 cli，每題一輪
+uv run python run_bench.py gemma4:12b --runs 1 --tier complex,cli
+
+# harness 矩陣
+uv run python run_bench.py gemma4:12b --harness pi,opencode,copilot,codex
+```
+
+`pyproject.toml` 也定義了 `run-bench` entry point；等價用法：
+
+```bash
+uv run run-bench gemma4:12b --runs 1 --tier smoke
+```
+
+首次跑 X1 officecli fixture 前，先產生素材：
+
+```bash
+uv run python fixtures/X1-officecli/.build.py
+```
+
+## LiteLLM 啟動 workflow
+
+`--provider litellm` 會把 harness 接到 `http://localhost:4000` 的 OpenAI-compatible LiteLLM proxy。這是跑 Bedrock 或其他雲端模型的主要 workflow。
+
+### 一次性準備
+
+```bash
+# 系統依賴
+sudo apt install postgresql
+
+# LiteLLM proxy CLI 必須在 PATH 上；若使用目前 Python 環境，可用：
+uv pip install 'litellm[proxy]' prisma
+
+# 建立實際設定檔，填入要路由的模型
+cp litellm_config.yaml.example litellm_config.yaml
+
+# 建立 PostgreSQL database/user
+sudo bash setup_litellm_db.sh
+```
+
+`setup_litellm_db.sh` 會建立：
+
+- database: `litellm`
+- user: `litellm`
+- password: `litellm_password`
+- connection string: `postgresql://litellm:litellm_password@localhost:5432/litellm`
+
+`litellm.sh` 支援用環境變數覆蓋 DB 設定：`LITELLM_DB_HOST`, `LITELLM_DB_PORT`, `LITELLM_DB_NAME`, `LITELLM_DB_USER`, `LITELLM_DB_PASSWORD`。
+
+### 啟動與驗證
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -139,144 +144,257 @@ export AWS_DEFAULT_REGION=us-west-2
 ./litellm.sh logs --tail 100
 ```
 
-常用管理指令：
+常用管理：
 
 ```bash
-./litellm.sh stop
 ./litellm.sh restart
+./litellm.sh stop
 ./litellm.sh db
 ./litellm.sh clean
 ```
 
-runner 也可以在需要 `litellm` provider 時嘗試自動啟動：
+runner 在偵測到 `--provider litellm` 時會檢查 proxy；也可以要求它自動呼叫 `./litellm.sh start`：
 
 ```bash
-python3 run_bench.py bedrock/nvidia.nemotron-super-3-120b \
-  --provider litellm --harness copilot --auto-start-litellm
+uv run python run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 \
+  --provider litellm --harness pi --tier smoke --runs 1 --auto-start-litellm
 ```
 
-#### 方式 B：Docker LiteLLM proxy（快速替代）
+不要把私有金鑰或私有模型設定寫進 `litellm_config.yaml.example`；實際設定放在 gitignored 的 `litellm_config.yaml`。
 
-如果只想快速啟動 proxy，也可以用 Docker。這條路徑不使用 `litellm.sh` 的 PostgreSQL 管理流程：
+## Harness 設定
+
+runner 實際支援的 harness 在 `bench/harnesses.py`。`pi` 支援 per-run `tools` 限制；`opencode`, `copilot`, `codex` 沒有等價限制，報告會標記 tools 欄位未生效。
+
+### pi
+
+Ollama：
+
+- 安裝 `pi` CLI。
+- 在 `~/.pi/agent/models.json` 註冊 Ollama provider/model。
+- runner 會執行：`pi --provider ollama --model <model> -p <prompt>`。
+
+LiteLLM：
+
+- LiteLLM proxy 啟動後，runner 會注入 `OPENAI_BASE_URL=http://localhost:4000/v1` 與 `OPENAI_API_KEY=sk-1234`。
+- runner 會執行：`pi --provider openai --model <model> -p <prompt>`。
+
+範例：
 
 ```bash
-docker run -d -p 4000:4000 \
-  -v $(pwd)/litellm_config.yaml.example:/app/config.yaml \
-  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION_NAME \
-  ghcr.io/berriai/litellm:main-latest \
-  --config /app/config.yaml
+uv run python run_bench.py gemma4:12b --provider ollama --harness pi --tier smoke --runs 1
+uv run python run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 --provider litellm --harness pi --tier smoke --runs 1
 ```
 
-若要保存本機實際設定，請複製 `litellm_config.yaml.example` 為 `litellm_config.yaml` 後再掛載該檔，避免把私有模型/金鑰設定寫回範本。
+### opencode
 
-各 harness 透過 litellm 的 OpenAI-compatible API 連接：
+在 `~/.config/opencode/opencode.jsonc` 註冊 `ollama` 與 `litellm` provider。provider 名稱必須與 runner 使用的 prefix 一致，因為 runner 會用 `ollama/<model>` 或 `litellm/<model>`。
 
-| harness | litellm 接法 |
-|---|---|
-| `pi` | `--provider openai` + `OPENAI_BASE_URL` 指向 litellm proxy |
-| `opencode` | `--model litellm/<model>`（需在 opencode.jsonc 註冊 litellm provider） |
-| `copilot` | `COPILOT_PROVIDER_BASE_URL` 指向 litellm proxy |
-| `codex` | `OPENAI_BASE_URL` 指向 litellm proxy |
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": {
+        "gemma4:12b": { "name": "gemma4:12b" }
+      }
+    },
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM Proxy",
+      "options": {
+        "baseURL": "http://localhost:4000/v1",
+        "apiKey": "sk-1234"
+      },
+      "models": {
+        "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0": {
+          "name": "Claude Sonnet (Bedrock)"
+        }
+      }
+    }
+  }
+}
+```
 
-**harness 差異注意**：pi 支援 per-run 工具限制（`--tools`），opencode、copilot 與 codex 沒有對等機制——這兩個 harness 跑「工具受限任務」（T1/T4/X1/X2）時全工具開放，報告會自動註記「tools 欄位未生效」，跨 harness 比較時要記得這點。opencode 的模型輸出從 `--format json` 事件流抽取（type=text），copilot 用 `-s` 只印回答，兩者的 EMPTY 判定因此與 pi 對齊。
-
-## 任務清單（5 個 tier、11 題）
-
-### Tier: smoke — 基準線（4 題，timeout 300s）
-
-確認模型具備最基本的 agent 能力，同時做為跨模型比較的底線。
-
-| 題目 | 工具限制 | 內容 | 驗證 |
-|---|---|---|---|
-| T1-程式理解 | read,grep,find,ls（唯讀） | 解釋 inventory.py 的兩個函式 | 回答提到 take 和 restock |
-| T2-修bug | 預設 4 工具 | calc.py 的 `a - b` 應為 `a + b` | 實際執行 calc.py 看 "all tests passed" |
-| T3-寫檔案 | 預設 4 工具 | 從零寫 FizzBuzz 1-15 | 執行產出檔，逐行比對第 3/15 行 |
-| T4-bash查資料 | read,bash | 數 CSV 資料列數 | 回答含正確數字 42 |
-
-### Tier: complex — 多檔案 coding（3 題，timeout 600s）
-
-**C1 跨檔 bug 追蹤**（`fixtures/C1-crossfile-bug/`）
-三層架構 `store.py`（庫存）→ `orders.py`（下單）→ `report.py`（報表）。bug 埋在最底層 store.py 的 `reserve()`：`>` 應為 `>=`，導致「剛好把庫存買完」被拒絕。但 pytest 的失敗斷言出現在最上層的報表測試。
-- **測什麼**：模型會不會被失敗訊息的位置誤導，能否沿呼叫鏈往下追根因。
-- **驗證**：tempdir 內跑 `python3 -m pytest -q`，exit 0 才 PASS。
-- **防作弊**：test_report.py 受 SHA-256 保護（見下方「保護檔案」）。
-
-**C2 重構保綠**（`fixtures/C2-refactor-green/`）
-a.py 與 b.py 有一段完全相同的名字正規化邏輯（`" ".join(name.strip().split()).title()`），要求抽成 utils.py 供兩邊共用。
-- **測什麼**：「改結構不改行為」——同時動三個檔案且不能弄壞任何測試。
-- **驗證**：三重檢查——pytest 通過 **且** utils.py 存在 **且** a.py/b.py 內容都引用 utils。缺一即 FAIL（防止模型假重構：測試過了但根本沒抽共用邏輯）。
-
-**C3 誤導性除錯**（`fixtures/C3-misleading-trace/`）
-`python3 main.py` 噴 TypeError，trace 指向 server.py 的 `self.port + 1`；真因在 config.py——settings.json 的 port 是字串 `"8080"`，config 層沒轉 int。
-- **測什麼**：治本 vs 治標的判斷力。
-- **驗證**：兩段式——(1) main.py 跑通且輸出含 "admin 8081"；(2) **根因檢查**：`load_config()["port"]` 必須是 int。若模型只在 server.py 貼 `int()` 繃帶，第 (1) 段會過但第 (2) 段 FAIL。修 config.py 或 settings.json 都算根因修法。
-
-### Tier: long — 長程多步驟（1 題，timeout 900s）
-
-**L1 從 spec 建專案**（`fixtures/L1-todo-spec/`）
-給 SPEC.md（todo CLI 完整規格：add/list/done 三個子命令、todos.json 持久化、精確輸出格式、id 不回收、done 冪等、未知 id 要 exit 1）+ 現成的 9 個 pytest 案例（用 subprocess 黑箱測試），要求從零寫出 todo.py。
-- **測什麼**：持續力。模型需要 讀規格 → 實作 → 跑測試 → 讀失敗訊息 → 修 → 再跑 的多輪迭代，小模型常中途「宣布完成」就停手。
-- **驗證**：todo.py 存在且 `pytest test_todo.py -q` 全綠。
-
-### Tier: cli — 陌生 CLI 操作（2 題，timeout 600s，工具限 read,bash）
-
-模擬使用者的實際目標（OfficeCLI、opencli/agent-browser）：模型面對一個**訓練資料裡不存在**的工具，能否從 `--help` 自學用法並完成任務。
-
-**X1 陌生 officecli**（`fixtures/X1-officecli/`）
-目錄裡有 `report.docx` 與 `./bin/officecli`（自製 Python CLI，argparse 完整 help，子命令 `info`/`convert`）。report.docx 是自訂 OFFX 容器格式：magic header + metadata + **base64 封裝的內文**——所以模型無法直接 `cat` 數字數，唯一路徑是學會 `officecli convert report.docx --format txt -o report.txt`。
-- **驗證**：.txt 輸出檔存在 + 回答含正確字數 45。
-- 素材由 `.build.py` 產生（runner 複製 fixture 時排除點開頭檔案，模型看不到產生邏輯與原文）。
-
-**X2 陌生 opencli**（`fixtures/X2-opencli/`）
-`./bin/opencli` 是迷你瀏覽器 CLI（`open <url>` / `links` / `text <selector>` / `dump`），頁面存在 fixture 的 pages/ 裡（假網站 shop.local，三頁）。任務：從首頁出發找 Aurora Lamp 的價格。**故意設計成兩跳**：首頁沒有價格，必須 open 首頁 → 從連結發現 /products → open 商品頁 → 用 selector 取價。工具用 `.opencli_session.json` 記住當前頁面，測模型的多步驟狀態管理。
-- **驗證**：回答含正確價格 149.50。
-
-### Tier: real — 真實工具整合（1 題，timeout 600s）
-
-**R1 agent-browser**：用真實安裝的 agent-browser 開 https://example.com 回報標題。X2 是它的離線替身；R1 驗證真實環境（真瀏覽器、真網路、真工具的複雜輸出）。
-- **驗證**：回答含 "Example Domain"。
-
-## Runner 機制細節（run_bench.py）
-
-**每輪的執行流程**：
-1. `prepare_dir()` 建全新 tempdir：fixture 整包複製（排除 `.` 開頭檔案與 `__pycache__`），`bin/` 下的檔案自動 chmod +x；無 fixture 的任務跑 inline setup 函式。
-2. 記下所有「保護檔案」的 SHA-256。
-3. 以 tempdir 為 cwd，用選定 harness 的非互動模式執行（cmd/env 由 `HARNESSES` registry 的 build 函式組出）：
-   - `pi`：`pi --provider ollama --model <M> [--tools ...] -p "<prompt>"`，環境帶 `PI_OFFLINE=1` 與 `PI_SKIP_VERSION_CHECK=1`（避免啟動時的網路請求干擾計時）。
-   - `opencode`：`opencode run --model ollama/<M> --auto --format json "<prompt>"`，stdout 為 JSONL 事件流，runner 抽取 type=text 事件作為模型輸出。
-   - `copilot`：`copilot -p "<prompt>" --allow-all-tools -s --no-color --no-custom-instructions --no-ask-user --no-auto-update`，環境帶 `COPILOT_PROVIDER_BASE_URL=<ollama>/v1` 與 `COPILOT_MODEL=<M>`（BYOK 接地端）。
-   - `codex`：`codex exec --oss --local-provider ollama -m <M> --dangerously-bypass-approvals-and-sandbox "<prompt>"`。
-4. 依序判定，取第一個命中的結果：
-   - **逾時**：超過任務 timeout，pi 被強制終止。
-   - **EMPTY**：pi 正常退出但 stdout 為空——模型從頭到尾沒產出給使用者的文字。注意：目前只讀 stdout，模型中間做了什麼、pi 有沒有在 stderr 報錯都看不到（已知盲點，見下）。
-   - **違規修改保護檔案**：任何保護檔案的 SHA-256 變了或檔案消失 → 直接 FAIL。防止模型「把測試改到會過」這種作弊路徑。
-   - **verify 函式**：該任務專屬的程式化驗證（跑 pytest、執行產出、比對輸出）。
-5. tempdir 銷毀，輪與輪之間零污染。
-
-**統計與報告**：
-- 終端即時印每輪結果（✅ / ❌ / ⬜EMPTY + 秒數 + 細節）。
-- 每模型彙總表：任務 × (通過數/輪數, EMPTY 數, 平均秒數) + 總通過率。
-- `results/<harness>_<provider>_<model>_<timestamp>.md`：彙總表 + **每一輪的完整模型輸出**，供人工檢查回答品質與失敗模式。
-
-**多輪的意義**：地端小模型有偶發性失敗（同一任務有時過有時空轉）。單輪只能回答「會不會」，5 輪能回答「多可靠」——`3/5` 和 `0/5` 是完全不同的診斷：前者是不穩，後者是系統性問題。
-
-## tests/ — 評測自身的可信度
-
-評測結果要可信，驗證邏輯本身得先被驗證。`tests/` 目錄用 pytest 對 6 個 fixture 任務各做兩個方向的檢查（共 12 個 test）：
-
-1. **原始碼直接跑 verify → 必須 FAIL**：確認 bug 真的存在、驗證不會放水。
-2. **套用人工正解再跑 verify → 必須 PASS**：確認驗證不會誤殺正確解法，同時實測 mock CLI 真的能用。
+範例：
 
 ```bash
-pytest           # 12 個 test 全綠才能拿去評測模型
-pytest -v        # 看每個 test 的名稱與結果
+uv run python run_bench.py gemma4:12b --provider ollama --harness opencode --tier smoke --runs 1
+uv run python run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 --provider litellm --harness opencode --tier smoke --runs 1
 ```
 
-測試按 tier 分檔：`test_verify_complex.py`（C1/C2/C3）、`test_verify_long.py`（L1）、`test_verify_cli.py`（X1/X2）。正解函式（`fix_*`）定義在 `tests/conftest.py`。
+### copilot
 
-## 已知限制與待辦
+安裝 `copilot` CLI。runner 會注入 `COPILOT_PROVIDER_BASE_URL` 與 `COPILOT_MODEL`，但 provider type/API key 建議由 shell 環境先設定：
 
-- **stderr 盲點**：runner 只讀 stdout。EMPTY 的真正死因（pi 的錯誤訊息、tool call 解析失敗等）可能在 stderr 但目前被丟棄。診斷計畫：補記 stderr/exit code + 用 `pi --mode json` 抓事件流。
-- **C1 系統性 EMPTY**：gemma4:12b 在 C1 連續 5/5 空輸出（17-24 秒即結束，未達 token 上限），原因調查中；嫌疑包括 `~/.pi/agent/models.json` 中重複的 gemma4:12b 條目（pi /model 選單自動寫入的 `reasoning: true` 版本）。
-- **X1 字數驗證**只認阿拉伯數字 45，模型答 "forty-five" 會被誤判 FAIL（目前接受此限制）。
-- **EMPTY ≠ 一定沒做事**：判定僅基於最終 stdout，模型可能有動工但最後一輪沒輸出文字。
+```bash
+export COPILOT_PROVIDER_TYPE=openai
+export COPILOT_PROVIDER_API_KEY=sk-1234
+```
+
+Ollama 時 base URL 由 runner 設為 `http://localhost:11434/v1`；LiteLLM 時設為 `http://localhost:4000/v1`。
+
+範例：
+
+```bash
+uv run python run_bench.py gemma4:12b --provider ollama --harness copilot --tier smoke --runs 1
+uv run python run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 --provider litellm --harness copilot --tier smoke --runs 1
+```
+
+### codex
+
+安裝 `codex` CLI。runner 目前用兩條路徑：
+
+- Ollama: `codex exec --oss --local-provider ollama -m <model> --dangerously-bypass-approvals-and-sandbox <prompt>`
+- LiteLLM: `OPENAI_BASE_URL=http://localhost:4000 OPENAI_API_KEY=sk-1234 codex exec -m <model> --dangerously-bypass-approvals-and-sandbox <prompt>`
+
+若你也想在互動式 Codex 使用同一個 LiteLLM endpoint，可在 `~/.codex/config.toml` 加 provider：
+
+```toml
+[model_providers.litellm]
+name = "LiteLLM Proxy"
+base_url = "http://localhost:4000"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+```
+
+範例：
+
+```bash
+uv run python run_bench.py gemma4:12b --provider ollama --harness codex --tier smoke --runs 1
+uv run python run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 --provider litellm --harness codex --tier smoke --runs 1
+```
+
+## Benchmark 指令範例
+
+```bash
+# 單模型、單 harness
+uv run python run_bench.py gemma4:12b --provider ollama --harness pi --tier smoke --runs 1
+
+# 多模型比較
+uv run python run_bench.py gemma4:12b qwen3.5:9b --provider ollama --harness pi --runs 3
+
+# Harness × model 矩陣
+uv run python run_bench.py gemma4:12b --provider ollama --harness pi,opencode,copilot,codex --runs 1
+
+# LiteLLM / Bedrock
+uv run python run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 \
+  --provider litellm --harness pi,opencode,copilot,codex --tier smoke --runs 1
+
+# Provider × harness 矩陣
+uv run python run_bench.py gemma4:12b \
+  --provider ollama,litellm --harness pi,copilot --tier smoke --runs 1
+```
+
+非預設 endpoint 可用：
+
+```bash
+export OLLAMA_BASE_URL=http://localhost:11434
+export LITELLM_BASE_URL=http://localhost:4000
+```
+
+## 任務清單
+
+| Tier | 任務 | 驗證重點 |
+|---|---|---|
+| `smoke` | T1 程式理解 | 回答提到 `take` 與 `restock` |
+| `smoke` | T2 修 bug | 修正 `calc.py` 後執行通過 |
+| `smoke` | T3 寫檔案 | 建立 `fizzbuzz.py` 並輸出正確第 3/15 行 |
+| `smoke` | T4 bash 查資料 | 正確數出 CSV data rows = 42 |
+| `complex` | C1 跨檔 bug | 追到 `store.py` 根因，pytest 全綠 |
+| `complex` | C2 重構保綠 | 抽出 `utils.py` 且 `a.py`/`b.py` 使用它 |
+| `complex` | C3 誤導除錯 | 修 config 層，`load_config()["port"]` 必須是 int |
+| `long` | L1 spec 建專案 | 依 `SPEC.md` 實作 todo CLI，pytest 全綠 |
+| `cli` | X1 陌生 officecli | 用 `./bin/officecli` 轉檔並回答 45 words |
+| `cli` | X2 陌生 opencli | 從首頁兩跳找到 Aurora Lamp 價格 149.50 |
+| `real` | R1 agent-browser | 用真實 `agent-browser` 打開 example.com 並回報 title |
+
+`bench/tasks.py` 是 task 定義的唯一來源；新增 task 時要同步新增 verifier 與測試。
+
+## Runner 判定邏輯
+
+每輪會：
+
+1. 建立全新 tempdir。
+2. 複製 fixture，排除點開頭檔案與 `__pycache__`。
+3. 對 protected files 記 SHA-256。
+4. 用指定 harness/provider/model 非互動執行 prompt。
+5. 依序判定 `TIMEOUT`, `TAMPERED`, `EMPTY-*`, `SILENT-PASS`, `PASS`, `FAIL`。
+6. 寫入終端摘要與 `results/*.md` 完整 run output。
+
+EMPTY 不是一定完全沒做事：runner 會比對 tempdir 前後 snapshot。若 stdout 空但檔案有改且 verifier 通過，會記為 `SILENT-PASS`。
+
+## 測試與新增任務
+
+測試全部用 `uv run`：
+
+```bash
+uv run pytest
+uv run pytest -v
+```
+
+測試策略是雙向驗證：
+
+- 原始 fixture 必須 fail，證明題目真的有 bug 或缺口。
+- 套用 `tests/conftest.py` 的 `fix_*` 正解後必須 pass，證明 verifier 不誤殺。
+
+新增 task 流程：
+
+1. 在 `bench/tasks.py` 加 `setup_*` 或 fixture，並加 `verify_*`。
+2. 多檔案題目放在 `fixtures/<task-name>/`。
+3. 在 `tests/conftest.py` 補 `fix_*`。
+4. 在對應 `tests/test_verify_*.py` 補原始 fail / 正解 pass 測試。
+5. 對不能被模型修改的檔案設定 `protected`。
+6. 跑 `uv run pytest`。
+
+## 故障排除
+
+### LiteLLM 無法啟動
+
+```bash
+pg_isready
+sudo systemctl status postgresql
+PGPASSWORD=litellm_password psql -h localhost -U litellm -d litellm -c '\q'
+./litellm.sh logs --tail 100
+```
+
+### LiteLLM API 不通
+
+```bash
+curl http://localhost:4000/v1/models \
+  -H "Authorization: Bearer sk-1234"
+```
+
+確認三個地方的 key 一致：
+
+- `litellm_config.yaml` 的 `general_settings.master_key`
+- harness 設定或環境變數
+- runner 預設的 `sk-1234`
+
+### Bedrock 模型無法呼叫
+
+```bash
+aws bedrock list-foundation-models --region us-west-2 | head
+./litellm.sh status
+./litellm.sh test
+```
+
+### Harness 工具限制不一致
+
+只有 `pi` 實際套用 `tools` 欄位。`opencode`, `copilot`, `codex` 跑 T1/T4/X1/X2 時仍是全工具可用，報告會自動提示。
+
+## 安全與 git hygiene
+
+不要提交：
+
+- `litellm_config.yaml`
+- `.litellm.pid`
+- `.litellm.log`
+- `.env`
+- 真實 AWS credential
+- 暫存 workspace 或私有模型金鑰
+
+產出的 benchmark 報告在 `results/`；是否提交取決於你是否要保留該次實驗結果。
