@@ -2,23 +2,33 @@ import json
 import os
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://localhost:4000")
+
+PROVIDERS = ("ollama", "litellm")
 
 
-def build_pi_cmd(model, tools, prompt):
-    cmd = ["pi", "--provider", "ollama", "--model", model, "-p", prompt]
+def build_pi_cmd(model, provider, tools, prompt):
+    if provider == "litellm":
+        cmd = ["pi", "--provider", "openai", "--model", model, "-p", prompt]
+        env = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1",
+               "OPENAI_BASE_URL": f"{LITELLM_BASE_URL}/v1",
+               "OPENAI_API_KEY": "sk-1234"}
+    else:
+        cmd = ["pi", "--provider", "ollama", "--model", model, "-p", prompt]
+        env = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1"}
     if tools:
         cmd[1:1] = ["--tools", tools]
-    return cmd, {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1"}
+    return cmd, env
 
 
-def build_opencode_cmd(model, tools, prompt):
-    cmd = ["opencode", "run", "--model", f"ollama/{model}", "--auto",
+def build_opencode_cmd(model, provider, tools, prompt):
+    prefix = "litellm" if provider == "litellm" else "ollama"
+    cmd = ["opencode", "run", "--model", f"{prefix}/{model}", "--auto",
            "--format", "json", prompt]
     return cmd, {}
 
 
 def extract_opencode_text(stdout):
-    """從 opencode 的 JSONL 事件流抽出模型給使用者的文字(type=text)。"""
     texts = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -33,17 +43,27 @@ def extract_opencode_text(stdout):
     return "\n".join(t for t in texts if t)
 
 
-def build_copilot_cmd(model, tools, prompt):
+def build_copilot_cmd(model, provider, tools, prompt):
+    if provider == "litellm":
+        base = f"{LITELLM_BASE_URL}/v1"
+    else:
+        base = f"{OLLAMA_BASE_URL}/v1"
     cmd = ["copilot", "-p", prompt, "--allow-all-tools", "-s", "--no-color",
            "--no-custom-instructions", "--no-ask-user", "--no-auto-update"]
-    return cmd, {"COPILOT_PROVIDER_BASE_URL": f"{OLLAMA_BASE_URL}/v1",
-                 "COPILOT_MODEL": model}
+    return cmd, {"COPILOT_PROVIDER_BASE_URL": base, "COPILOT_MODEL": model}
 
 
-def build_codex_cmd(model, tools, prompt):
-    cmd = ["codex", "exec", "--oss", "--local-provider", "ollama",
-           "-m", model, "--dangerously-bypass-approvals-and-sandbox", prompt]
-    return cmd, {}
+def build_codex_cmd(model, provider, tools, prompt):
+    if provider == "litellm":
+        cmd = ["codex", "exec", "-m", model,
+               "--dangerously-bypass-approvals-and-sandbox", prompt]
+        env = {"OPENAI_BASE_URL": LITELLM_BASE_URL,
+               "OPENAI_API_KEY": "sk-1234"}
+    else:
+        cmd = ["codex", "exec", "--oss", "--local-provider", "ollama",
+               "-m", model, "--dangerously-bypass-approvals-and-sandbox", prompt]
+        env = {}
+    return cmd, env
 
 
 HARNESSES = {

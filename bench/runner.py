@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from bench import FIXTURES, RESULTS_DIR
-from bench.harnesses import HARNESSES
+from bench.harnesses import HARNESSES, PROVIDERS
 from bench.tasks import TASKS, DEFAULT_TIERS
 
 
@@ -57,13 +57,13 @@ STATUS_MARK = {
 }
 
 
-def run_once(harness, model, task):
+def run_once(harness, provider, model, task):
     d = prepare_dir(task)
     try:
         protected = {name: _sha(d / name) for name in task.get("protected", [])}
         snap = _snapshot(d)
 
-        cmd, extra_env = HARNESSES[harness]["build"](model, task["tools"], task["prompt"])
+        cmd, extra_env = HARNESSES[harness]["build"](model, provider, task["tools"], task["prompt"])
         env = {**os.environ, **extra_env}
 
         t0 = time.time()
@@ -126,6 +126,8 @@ def main():
                     help="逗號分隔: smoke,complex,long,cli,real")
     ap.add_argument("--harness", default="pi",
                     help="逗號分隔: " + ",".join(HARNESSES))
+    ap.add_argument("--provider", default="ollama",
+                    help="逗號分隔: " + ",".join(PROVIDERS))
     args = ap.parse_args()
 
     tiers = [t.strip() for t in args.tier.split(",") if t.strip()]
@@ -136,14 +138,18 @@ def main():
     unknown = [h for h in harnesses if h not in HARNESSES]
     if unknown:
         sys.exit(f"未知 harness: {', '.join(unknown)}（可用: {', '.join(HARNESSES)}）")
+    providers = [p.strip() for p in args.provider.split(",") if p.strip()]
+    unknown_p = [p for p in providers if p not in PROVIDERS]
+    if unknown_p:
+        sys.exit(f"未知 provider: {', '.join(unknown_p)}（可用: {', '.join(PROVIDERS)}）")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
 
-    for harness, model in [(h, m) for h in harnesses for m in args.models]:
+    for harness, provider, model in [(h, p, m) for h in harnesses for p in providers for m in args.models]:
         tools_note = (not HARNESSES[harness]["tools_supported"]
                       and any(t["tools"] for t in tasks))
-        print(f"\n{'=' * 64}\nharness: {harness}   模型: {model}   runs={args.runs}   tiers={','.join(tiers)}")
+        print(f"\n{'=' * 64}\nharness: {harness}   provider: {provider}   模型: {model}   runs={args.runs}   tiers={','.join(tiers)}")
         if tools_note:
             print("⚠ 此 harness 不支援 per-run 工具限制, 各任務的 tools 欄位未生效")
         print("=" * 64)
@@ -152,7 +158,7 @@ def main():
             results = []
             for i in range(args.runs):
                 print(f"  {task['id']} run {i + 1}/{args.runs} ...", end="", flush=True)
-                res = run_once(harness, model, task)
+                res = run_once(harness, provider, model, task)
                 mark = STATUS_MARK[res["status"]]
                 print(f" {mark} ({res['seconds']}s) {res['detail']}")
                 results.append(res)
@@ -173,9 +179,9 @@ def main():
         print(f"\n  總計: {total_p}/{total_r} ({100 * total_p // total_r}%)")
 
         safe_model = model.replace(":", "_").replace("/", "_")
-        report = RESULTS_DIR / f"{harness}_{safe_model}_{stamp}.md"
-        lines = [f"# model-harness-eval: {model} × {harness}",
-                 f"日期: {time.strftime('%Y-%m-%d %H:%M')}  harness={harness}  runs={args.runs}  tiers={','.join(tiers)}"]
+        report = RESULTS_DIR / f"{harness}_{provider}_{safe_model}_{stamp}.md"
+        lines = [f"# model-harness-eval: {model} × {harness} × {provider}",
+                 f"日期: {time.strftime('%Y-%m-%d %H:%M')}  harness={harness}  provider={provider}  runs={args.runs}  tiers={','.join(tiers)}"]
         if tools_note:
             lines.append("\n> ⚠ 此 harness 不支援 per-run 工具限制, 各任務的 tools 欄位未生效。")
         lines += ["", "| 任務 | tier | 通過率 | 靜默通過 | EMPTY | 平均秒數 |",
