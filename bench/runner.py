@@ -23,6 +23,12 @@ from urllib.request import urlopen
 from urllib.error import URLError
 
 from bench import FIXTURES, RESULTS_DIR
+from bench.fixture_baseline import (
+    BASELINE_COMMIT,
+    assert_fixture_tree_unchanged,
+    snapshot_fixture_tree,
+    validate_fixture_baseline,
+)
 from bench.harnesses import HARNESSES, PROVIDERS, LITELLM_BASE_URL
 from bench.tasks import TASKS, DEFAULT_TIERS
 
@@ -61,11 +67,14 @@ STATUS_MARK = {
 
 def run_once(harness, provider, model, task):
     d = prepare_dir(task)
+    source_before = snapshot_fixture_tree(FIXTURES)
     try:
         protected = {name: _sha(d / name) for name in task.get("protected", [])}
         snap = _snapshot(d)
 
-        cmd, extra_env = HARNESSES[harness]["build"](model, provider, task["tools"], task["prompt"])
+        cmd, extra_env = HARNESSES[harness]["build"](
+            model, provider, task["tools"], task["prompt"], d
+        )
         env = {**os.environ, **extra_env}
 
         t0 = time.time()
@@ -117,7 +126,26 @@ def run_once(harness, provider, model, task):
         return dict(ok=ok, status=status, seconds=elapsed, detail=detail,
                     stdout=stdout.strip(), stderr=stderr.strip()[-500:])
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        try:
+            assert_fixture_tree_unchanged(FIXTURES, source_before)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def select_tasks(tiers, requested=None):
+    """Select tasks by tier and optional stable task prefixes such as C2,L1."""
+    tasks = [task for task in TASKS if task["tier"] in tiers]
+    if not requested:
+        return tasks
+    prefixes = [value.strip().upper() for value in requested.split(",") if value.strip()]
+    by_prefix = {task["id"].split("-", 1)[0].upper(): task for task in tasks}
+    unknown = [prefix for prefix in prefixes if prefix not in by_prefix]
+    if unknown:
+        available = ",".join(by_prefix)
+        raise ValueError(
+            f"未知 task: {', '.join(unknown)}（目前 tier 可用: {available}）"
+        )
+    return [by_prefix[prefix] for prefix in prefixes]
 
 
 def check_litellm_running():
@@ -167,6 +195,8 @@ def main():
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--tier", default=",".join(DEFAULT_TIERS),
                     help="逗號分隔: smoke,complex,long,cli,real")
+    ap.add_argument("--task", default=None,
+                    help="只跑指定 task prefix，例如 C2,C3,L1,X1")
     ap.add_argument("--harness", default="pi",
                     help="逗號分隔: " + ",".join(HARNESSES))
     ap.add_argument("--provider", default="ollama",
@@ -176,7 +206,10 @@ def main():
     args = ap.parse_args()
 
     tiers = [t.strip() for t in args.tier.split(",") if t.strip()]
-    tasks = [t for t in TASKS if t["tier"] in tiers]
+    try:
+        tasks = select_tasks(tiers, args.task)
+    except ValueError as exc:
+        ap.error(str(exc))
     if not tasks:
         sys.exit(f"沒有符合 tier {tiers} 的任務")
     harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
@@ -187,6 +220,8 @@ def main():
     unknown_p = [p for p in providers if p not in PROVIDERS]
     if unknown_p:
         sys.exit(f"未知 provider: {', '.join(unknown_p)}（可用: {', '.join(PROVIDERS)}）")
+
+    baseline_fingerprint = validate_fixture_baseline(FIXTURES)
 
     # 檢查 LiteLLM 是否需要運行
     if "litellm" in providers:
@@ -230,7 +265,11 @@ def main():
         safe_model = model.replace(":", "_").replace("/", "_")
         report = RESULTS_DIR / f"{harness}_{provider}_{safe_model}_{stamp}.md"
         lines = [f"# model-harness-eval: {model} × {harness} × {provider}",
-                 f"日期: {time.strftime('%Y-%m-%d %H:%M')}  harness={harness}  provider={provider}  runs={args.runs}  tiers={','.join(tiers)}"]
+                 f"日期: {time.strftime('%Y-%m-%d %H:%M')}  harness={harness}  provider={provider}  runs={args.runs}  tiers={','.join(tiers)}",
+                 ("benchmark_schema=2  isolation=verified  "
+                  f"baseline_commit={BASELINE_COMMIT}  "
+                  f"baseline_fingerprint={baseline_fingerprint}  "
+                  f"tasks={','.join(t['id'].split('-', 1)[0] for t in tasks)}")]
         if tools_note:
             lines.append("\n> ⚠ 此 harness 不支援 per-run 工具限制, 各任務的 tools 欄位未生效。")
         lines += ["", "| 任務 | tier | 通過率 | 靜默通過 | EMPTY | 平均秒數 |",

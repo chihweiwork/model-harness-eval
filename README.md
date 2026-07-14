@@ -42,9 +42,9 @@ runner 對 provider 的實際映射：
 
 | Harness | `--provider ollama` | `--provider litellm` |
 |---|---|---|
-| `pi` | `pi --provider ollama --model <model>` | `pi --provider openai --model <model>`，並注入 `OPENAI_BASE_URL=<LITELLM_BASE_URL>/v1`, `OPENAI_API_KEY=sk-1234` |
-| `opencode` | `opencode run --model ollama/<model>` | `opencode run --model litellm/<model>`；需在 `opencode.jsonc` 有同名 provider |
-| `copilot` | 注入 `COPILOT_PROVIDER_BASE_URL=<OLLAMA_BASE_URL>/v1`, `COPILOT_MODEL=<model>` | 注入 `COPILOT_PROVIDER_BASE_URL=<LITELLM_BASE_URL>/v1`, `COPILOT_MODEL=<model>` |
+| `pi` | `pi --provider ollama --model <model>` | `pi --provider litellm --model <model>`；需在 `~/.pi/agent/models.json` 有同名 provider |
+| `opencode` | `opencode run --model ollama/<model>` | `opencode run --model litellm/<model>`；需在 `opencode.jsonc` 有同名 provider 與 `apiKey` |
+| `copilot` | 注入 `COPILOT_PROVIDER_TYPE=openai`, `COPILOT_PROVIDER_BASE_URL=<OLLAMA_BASE_URL>/v1`, `COPILOT_MODEL=<model>` | 注入 `COPILOT_PROVIDER_TYPE=openai`, `COPILOT_PROVIDER_BASE_URL=<LITELLM_BASE_URL>/v1`, `COPILOT_PROVIDER_API_KEY=sk-1234`, `COPILOT_MODEL=<model>` |
 | `codex` | `codex exec --oss --local-provider ollama -m <model>` | 注入 `OPENAI_BASE_URL=<LITELLM_BASE_URL>`, `OPENAI_API_KEY=sk-1234`，再跑 `codex exec -m <model>` |
 
 當 provider 清單包含 `litellm` 時，runner 會先打 `LITELLM_BASE_URL/v1/models` 檢查 proxy；未啟動時可加 `--auto-start-litellm` 讓 runner 呼叫 `./litellm.sh start`。
@@ -88,7 +88,15 @@ uv run python run_bench.py gemma4:12b --runs 1 --tier complex,cli
 
 # harness 矩陣
 uv run python run_bench.py gemma4:12b --harness pi,opencode,copilot,codex
+
+# 只補跑指定 task（prefix 以逗號分隔）
+uv run python run_bench.py gemma4:12b --runs 5 --task C2,C3,L1,X1
+
+# 依 results/selection.json 重建彙總報告
+uv run python -m bench.report --results results
 ```
+
+runner 會先用 Git 歷史固定的 fixture blob fingerprint 驗證題目基線，並在每輪後確認 agent 沒有改到來源 `fixtures/`。基線不符或來源遭修改時會立即中止，不會繼續產生可計分結果。
 
 `pyproject.toml` 也定義了 `run-bench` entry point；等價用法：
 
@@ -176,8 +184,28 @@ Ollama：
 
 LiteLLM：
 
-- LiteLLM proxy 啟動後，runner 會注入 `OPENAI_BASE_URL=http://localhost:4000/v1` 與 `OPENAI_API_KEY=sk-1234`。
-- runner 會執行：`pi --provider openai --model <model> -p <prompt>`。
+- LiteLLM proxy 啟動後，runner 會執行：`pi --provider litellm --model <model> -p <prompt>`。
+- `litellm` 是 Pi 的自訂 provider，必須寫在 `~/.pi/agent/models.json`。
+
+```json
+{
+  "providers": {
+    "litellm": {
+      "baseUrl": "http://localhost:4000/v1",
+      "api": "openai-completions",
+      "apiKey": "sk-1234",
+      "models": [
+        {
+          "id": "bedrock/nvidia.nemotron-super-3-120b",
+          "name": "Nemotron 120B (Bedrock)",
+          "contextWindow": 128000,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}
+```
 
 範例：
 
@@ -228,14 +256,10 @@ uv run python run_bench.py bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0 --
 
 ### copilot
 
-安裝 `copilot` CLI。runner 會注入 `COPILOT_PROVIDER_BASE_URL` 與 `COPILOT_MODEL`，但 provider type/API key 建議由 shell 環境先設定：
+安裝 `copilot` CLI。Copilot 的 BYOK 模式由 `COPILOT_PROVIDER_BASE_URL` 啟動，runner 會自行注入所需環境變數。
 
-```bash
-export COPILOT_PROVIDER_TYPE=openai
-export COPILOT_PROVIDER_API_KEY=sk-1234
-```
-
-Ollama 時 base URL 由 runner 設為 `http://localhost:11434/v1`；LiteLLM 時設為 `http://localhost:4000/v1`。
+- Ollama：`COPILOT_PROVIDER_TYPE=openai`, `COPILOT_PROVIDER_BASE_URL=http://localhost:11434/v1`, `COPILOT_MODEL=<model>`
+- LiteLLM：`COPILOT_PROVIDER_TYPE=openai`, `COPILOT_PROVIDER_BASE_URL=http://localhost:4000/v1`, `COPILOT_PROVIDER_API_KEY=sk-1234`, `COPILOT_MODEL=<model>`
 
 範例：
 

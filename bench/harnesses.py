@@ -7,24 +7,24 @@ LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://localhost:4000")
 PROVIDERS = ("ollama", "litellm")
 
 
-def build_pi_cmd(model, provider, tools, prompt):
+def build_pi_cmd(model, provider, tools, prompt, workdir):
     if provider == "litellm":
-        cmd = ["pi", "--provider", "openai", "--model", model, "-p", prompt]
-        env = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1",
-               "OPENAI_BASE_URL": f"{LITELLM_BASE_URL}/v1",
-               "OPENAI_API_KEY": "sk-1234"}
+        cmd = ["pi", "--provider", "litellm", "--model", model, "-p", prompt]
+        env = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1"}
     else:
         cmd = ["pi", "--provider", "ollama", "--model", model, "-p", prompt]
         env = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1"}
     if tools:
         cmd[1:1] = ["--tools", tools]
+    cmd[1:1] = ["--no-session"]
     return cmd, env
 
 
-def build_opencode_cmd(model, provider, tools, prompt):
+def build_opencode_cmd(model, provider, tools, prompt, workdir):
     prefix = "litellm" if provider == "litellm" else "ollama"
-    cmd = ["opencode", "run", "--model", f"{prefix}/{model}", "--auto",
-           "--format", "json", prompt]
+    cmd = ["opencode", "run", "--dir", str(workdir),
+           "--model", f"{prefix}/{model}", "--auto", "--format", "json",
+           prompt]
     return cmd, {}
 
 
@@ -43,24 +43,29 @@ def extract_opencode_text(stdout):
     return "\n".join(t for t in texts if t)
 
 
-def build_copilot_cmd(model, provider, tools, prompt):
+def build_copilot_cmd(model, provider, tools, prompt, workdir):
+    env = {"COPILOT_PROVIDER_TYPE": "openai", "COPILOT_MODEL": model}
     if provider == "litellm":
         base = f"{LITELLM_BASE_URL}/v1"
+        env["COPILOT_PROVIDER_API_KEY"] = "sk-1234"
     else:
         base = f"{OLLAMA_BASE_URL}/v1"
-    cmd = ["copilot", "-p", prompt, "--allow-all-tools", "-s", "--no-color",
+    env["COPILOT_PROVIDER_BASE_URL"] = base
+    cmd = ["copilot", "-C", str(workdir), "-p", prompt,
+           "--allow-all-tools", "-s", "--no-color",
            "--no-custom-instructions", "--no-ask-user", "--no-auto-update"]
-    return cmd, {"COPILOT_PROVIDER_BASE_URL": base, "COPILOT_MODEL": model}
+    return cmd, env
 
 
-def build_codex_cmd(model, provider, tools, prompt):
+def build_codex_cmd(model, provider, tools, prompt, workdir):
     if provider == "litellm":
-        cmd = ["codex", "exec", "-m", model,
+        cmd = ["codex", "exec", "-C", str(workdir), "--ephemeral", "-m", model,
                "--dangerously-bypass-approvals-and-sandbox", prompt]
         env = {"OPENAI_BASE_URL": LITELLM_BASE_URL,
                "OPENAI_API_KEY": "sk-1234"}
     else:
-        cmd = ["codex", "exec", "--oss", "--local-provider", "ollama",
+        cmd = ["codex", "exec", "-C", str(workdir), "--ephemeral",
+               "--oss", "--local-provider", "ollama",
                "-m", model, "--dangerously-bypass-approvals-and-sandbox", prompt]
         env = {}
     return cmd, env
