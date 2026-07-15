@@ -26,6 +26,7 @@ from bench import FIXTURES, RESULTS_DIR, ROOT
 from bench.fixture_baseline import (
     BASELINE_COMMIT,
     FixtureBaselineError,
+    SourceFixtureTampered,
     assert_fixture_tree_unchanged,
     reset_fixture_tree,
     snapshot_fixture_tree,
@@ -259,6 +260,8 @@ def main():
                     help="每次 benchmark 用這個 Git commit/tree 建立 disposable worktree")
     ap.add_argument("--no-worktree-isolation", action="store_true",
                     help="不要建立 disposable worktree；直接在目前 checkout 執行")
+    ap.add_argument("--auto-recover", action="store_true",
+                    help="fixture 被污染時自動還原並繼續，不中止 benchmark")
     args = ap.parse_args()
 
     if args.doctor_fixtures:
@@ -320,7 +323,15 @@ def main():
             results = []
             for i in range(args.runs):
                 print(f"  {task['id']} run {i + 1}/{args.runs} ...", end="", flush=True)
-                res = run_once(harness, provider, model, task)
+                try:
+                    res = run_once(harness, provider, model, task)
+                except SourceFixtureTampered as exc:
+                    if not args.auto_recover:
+                        raise
+                    print(f" 🚫 fixture 被污染: {exc}")
+                    reset_fixture_tree(FIXTURES, args.fixture_source)
+                    res = dict(ok=False, status="TAMPERED", seconds=0,
+                               detail=str(exc), stdout="", stderr="")
                 mark = STATUS_MARK[res["status"]]
                 print(f" {mark} ({res['seconds']}s) {res['detail']}")
                 results.append(res)
