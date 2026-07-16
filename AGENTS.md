@@ -1,30 +1,66 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+Benchmarks "model × coding-agent harness × provider" with programmatic verifiers.
+`bench/runner.py:main` is the real entrypoint; `run_bench.py` is `from bench.runner import main; main()`.
+`pyproject.toml` also registers `run-bench` → `uv run run-bench <model>`.
 
-This repository evaluates model, harness, and provider combinations with programmatic checks. `run_bench.py` is the thin CLI entry point. Core code lives in `bench/`: `runner.py` handles execution and reporting, `tasks.py` defines benchmark tasks and verifiers, and `harnesses.py` registers harness command builders. `tests/` contains pytest coverage for verifier correctness. `fixtures/` holds task projects copied into temporary workspaces during runs. `results/` stores generated Markdown benchmark reports. LiteLLM configuration starts from `litellm_config.yaml.example`; keep real credentials out of the repo.
+## All commands need `uv run`
 
-## Build, Test, and Development Commands
+```bash
+uv run pytest                              # verifier test suite
+uv run pytest -v                           # verbose fixture tests
+uv run python run_bench.py gemma4:12b       # full benchmark (default: 5 runs, all tiers, harness=pi)
+uv run run-bench gemma4:12b --runs 1        # same via pyproject.toml entrypoint
+uv run python fixtures/X1-officecli/.build.py   # one-time: generate X1 test assets
+```
 
-- `pytest`: run the verifier test suite configured in `pyproject.toml`.
-- `pytest -v`: show each fixture verification case.
-- `python3 run_bench.py gemma4:12b`: run the default benchmark matrix for one model.
-- `python3 run_bench.py gemma4:12b --runs 1 --tier complex,cli`: run a shorter targeted benchmark.
-- `python3 run_bench.py gemma4:12b --harness pi,opencode,copilot,codex`: compare harnesses.
-- `./litellm.sh start`: start the LiteLLM proxy before `--provider litellm` runs.
+## Harness × Provider architecture
 
-## Coding Style & Naming Conventions
+`bench/harnesses.py` defines `HARNESSES` dict. Each entry has `build` (cmd builder), `tools_supported` (bool), `extract` (stdout parser or None).
+Providers: `("ollama", "litellm")` only. Map by env vars `OLLAMA_BASE_URL` / `LITELLM_BASE_URL` (defaults `localhost:11434` / `localhost:4000`).
 
-Use Python 3.10+ and standard-library-first code. Follow the existing style: 4-space indentation, small functions, explicit `Path` usage for filesystem work, and task dictionaries with stable keys such as `id`, `tier`, `verify`, `timeout`, `tools`, and `prompt`. Name verifiers `verify_<task>` and setup helpers `setup_<task>`. Keep runner output and report fields stable unless tests and docs are updated together.
+| Harness | `tools_supported` | stdout extract | Litellm path | Ollama path |
+|---------|-------------------|----------------|--------------|-------------|
+| `pi` | Yes | None | `pi --provider litellm` + `~/.pi/agent/models.json` entry | `pi --provider ollama` |
+| `opencode` | No | `extract_opencode_text()` from JSONL `{"type":"text"}` events | `opencode run --model litellm/<m>` | `opencode run --model ollama/<m>` |
+| `copilot` | No | None | env `COPILOT_PROVIDER_BASE_URL` + `COPILOT_PROVIDER_API_KEY=sk-1234` | env `COPILOT_PROVIDER_BASE_URL` |
+| `codex` | No | None | `OPENAI_BASE_URL=http://localhost:4000` + `codex exec -m <m>` | `codex exec --oss --local-provider ollama -m <m>` |
 
-## Testing Guidelines
+## Runner judgment pipeline (in this order)
 
-Tests use pytest. Fixture-based tasks should have two-way tests: the original fixture must fail verification, and the applied reference fix must pass. Add reference fix helpers in `tests/conftest.py`, then add tier-specific tests such as `test_verify_complex.py`, `test_verify_long.py`, or `test_verify_cli.py`. Run `pytest` before using new tasks in benchmarks.
+1. Create tempdir, copy fixture (excludes dotfiles and `__pycache__`)
+2. SHA-256 protected files → run harness non-interactively → SHA-256 again
+3. TIMEOUT → TAMPERED (protected file changed) → EMPTY-* (no stdout, check file snapshot diff) → SILENT-PASS / PASS / FAIL
+4. EMPTY-無痕 = no stdout + no file changes; EMPTY-有動工 = no stdout + files changed but verify fails
+5. SILENT-PASS = no stdout but files changed AND verify passes
 
-## Commit & Pull Request Guidelines
+## Tasks
 
-Recent history uses Conventional Commit prefixes such as `feat:`, `fix:`, `refactor:`, `docs:`, and `chore:`. Keep commits focused and mention affected harnesses, providers, or task tiers when relevant. Pull requests should include a short purpose statement, verification output, any generated report paths, and notes for configuration-sensitive changes such as LiteLLM, Ollama, or external CLI requirements.
+Defined in `bench/tasks.py` (`TASKS` list). Inline tasks use `setup` function; multi-file tasks use `fixture` dir. Smoke tasks (T1/T2/T4) have setup; T3 and R1 have no setup. `protected` files are SHA-256 checked.
 
-## Security & Configuration Tips
+| Tier | Tasks | Fixture dirs |
+|------|-------|-------------|
+| smoke | T1/T2/T3/T4 | inline setup (no dir) |
+| complex | C1/C2/C3 | `fixtures/C1-crossfile-bug/`, etc. |
+| long | L1 | `fixtures/L1-todo-spec/` |
+| cli | X1/X2 | `fixtures/X1-officecli/`, `fixtures/X2-opencli/` |
+| real | R1 | uses real `agent-browser` CLI, no fixture |
 
-Do not commit real `litellm_config.yaml`, cloud credentials, local model secrets, or generated temp workspaces. Prefer `.example` files for shareable configuration.
+## Testing pattern (bidirectional verification)
+
+`tests/conftest.py:copy_fixture` mirrors `bench.runner.prepare_dir` logic. Each fixture task has two tests:
+- original → verify must **FAIL** (proves bug exists)
+- apply `fix_*` from conftest → verify must **PASS** (proves verifier isn't broken)
+
+Test files: `test_verify_complex.py` (C1/C2/C3), `test_verify_long.py` (L1), `test_verify_cli.py` (X1/X2).
+Smoke tasks (T1-T4) have no dedicated test file.
+
+## Known quirks
+
+- Only `pi` enforces per-task `tools` restrictions. opencode/copilot/codex ignore `tools`; report marks them.
+- X1 fixture has `.build.py` (runs once: `uv run python fixtures/X1-officecli/.build.py`). Dotfiles are excluded from copy, so models never see the build script.
+- R1 requires `agent-browser` CLI installed (real tool, not a fixture).
+- LiteLLM requires PostgreSQL: run `setup_litellm_db.sh` once, start with `./litellm.sh start`. Runner checks `/v1/models`; pass `--auto-start-litellm` to auto-start.
+- `litellm_config.yaml` is gitignored; use `litellm_config.yaml.example` as template. All API keys default to `sk-1234`.
+- No CI/CD (no `.github/`).
+- Only dep: `pytest>=7.0`.
