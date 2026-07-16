@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 .omc/
+.venv/
+.pytest_cache/
+.codex/
+.agents/
 litellm_config.yaml
 .litellm.pid
 .litellm.log
