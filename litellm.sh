@@ -241,6 +241,148 @@ cmd_test() {
     success "Model OK: $content"
 }
 
+get_models() {
+    grep 'model_name:' "$CONFIG_FILE" | sed 's/.*model_name:[[:space:]]*//' | tr -d '"'
+}
+
+cmd_warmup() {
+    if ! is_running; then
+        error "LiteLLM not running"
+        exit 1
+    fi
+
+    local models
+    models=$(get_models)
+    local total
+    total=$(echo "$models" | wc -l)
+    local ok=0 fail=0
+
+    info "Warming up $total models (parallel)..."
+
+    local pids=()
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    for model in $models; do
+        (
+            local start_ms
+            start_ms=$(date +%s%3N)
+            local resp
+            resp=$(curl -sf --max-time 120 "$BASE_URL/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $API_KEY" \
+                -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":3}" 2>&1)
+            local rc=$?
+            local end_ms
+            end_ms=$(date +%s%3N)
+            local elapsed=$(( end_ms - start_ms ))
+
+            if [[ $rc -eq 0 ]] && echo "$resp" | grep -q '"choices"'; then
+                echo "OK ${elapsed}ms" > "$tmpdir/$(echo "$model" | tr '/:' '__')"
+            else
+                echo "FAIL ${elapsed}ms" > "$tmpdir/$(echo "$model" | tr '/:' '__')"
+            fi
+        ) &
+        pids+=($!)
+    done
+
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    for model in $models; do
+        local key
+        key=$(echo "$model" | tr '/:' '__')
+        if [[ -f "$tmpdir/$key" ]]; then
+            local result
+            result=$(cat "$tmpdir/$key")
+            local status="${result%% *}"
+            local elapsed="${result#* }"
+            if [[ "$status" == "OK" ]]; then
+                success "$model  ($elapsed)"
+                ((ok++))
+            else
+                error "$model  ($elapsed)"
+                ((fail++))
+            fi
+        else
+            error "$model  (no result)"
+            ((fail++))
+        fi
+    done
+
+    rm -rf "$tmpdir"
+    echo ""
+    success "Warmup done: $ok OK, $fail failed (out of $total)"
+}
+
+cmd_health() {
+    if ! is_running; then
+        error "LiteLLM not running"
+        exit 1
+    fi
+
+    info "Checking LiteLLM health..."
+    if ! curl -sf "$BASE_URL/health" -H "Authorization: Bearer $API_KEY" >/dev/null; then
+        error "Proxy health endpoint failed"
+        exit 1
+    fi
+    success "Proxy OK ($BASE_URL)"
+    echo ""
+
+    local models
+    models=$(get_models)
+    local total
+    total=$(echo "$models" | wc -l)
+    local ok=0 fail=0 slow=0
+    local SLOW_THRESHOLD_MS=10000
+
+    info "Checking $total models..."
+    echo ""
+    printf "  %-50s  %8s  %s\n" "MODEL" "LATENCY" "STATUS"
+    printf "  %-50s  %8s  %s\n" "-----" "-------" "------"
+
+    for model in $models; do
+        local start_ms
+        start_ms=$(date +%s%3N)
+        local resp
+        resp=$(curl -sf --max-time 120 "$BASE_URL/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_KEY" \
+            -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":3}" 2>&1)
+        local rc=$?
+        local end_ms
+        end_ms=$(date +%s%3N)
+        local elapsed=$(( end_ms - start_ms ))
+
+        if [[ $rc -eq 0 ]] && echo "$resp" | grep -q '"choices"'; then
+            if [[ $elapsed -gt $SLOW_THRESHOLD_MS ]]; then
+                printf "  %-50s  %6dms  ${YELLOW}SLOW${NC}\n" "$model" "$elapsed"
+                ((ok++))
+                ((slow++))
+            else
+                printf "  %-50s  %6dms  ${GREEN}OK${NC}\n" "$model" "$elapsed"
+                ((ok++))
+            fi
+        else
+            local err_msg=""
+            if [[ -n "$resp" ]]; then
+                err_msg=$(echo "$resp" | jq -r '.error.message // empty' 2>/dev/null || true)
+            fi
+            printf "  %-50s  %6dms  ${RED}FAIL${NC}" "$model" "$elapsed"
+            [[ -n "$err_msg" ]] && printf "  %s" "$err_msg"
+            printf "\n"
+            ((fail++))
+        fi
+    done
+
+    echo ""
+    echo "  ──────────────────────────────────────────"
+    echo "  Total: $total  OK: $ok  Slow: $slow  Fail: $fail"
+    [[ $slow -gt 0 ]] && info "Slow threshold: ${SLOW_THRESHOLD_MS}ms (cold start is normal for first invoke)"
+    [[ $fail -gt 0 ]] && error "Some models failed — check logs: ./litellm.sh logs --tail 50"
+}
+
 cmd_clean() {
     if is_running; then
         error "LiteLLM is still running"
@@ -270,6 +412,8 @@ Commands:
   status             Show running status and loaded models
   logs [--tail N]    Show logs (default: all, --tail N: last N lines, -f: follow)
   test               Test health and model API
+  warmup             Warm up all models in parallel (trigger cold start)
+  health             Check proxy and each model with latency report
   db                 Connect to PostgreSQL database
   clean              Remove PID file and logs (must stop first)
   help               Show this help
@@ -314,6 +458,8 @@ case "${1:-help}" in
     status)  cmd_status ;;
     logs)    shift; cmd_logs "$@" ;;
     test)    cmd_test ;;
+    warmup)  cmd_warmup ;;
+    health)  cmd_health ;;
     db)      cmd_db ;;
     clean)   cmd_clean ;;
     help|-h|--help) cmd_help ;;

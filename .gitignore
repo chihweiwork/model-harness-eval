@@ -5,3 +5,5 @@ litellm_config.yaml
 .litellm.pid
 .litellm.log
 .env
+.opencli_session.json
+results/
